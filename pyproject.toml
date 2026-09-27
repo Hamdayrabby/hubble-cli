@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hubble-cli"
+version = "4.0.0"
+description = "Hubble: agentic coding CLI for AIHub and other OpenAI-compatible APIs"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.25.0",
+    "rich>=13.0",
+    "prompt_toolkit>=3.0.40",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+hubble = "hubble.main:main"
+aihub = "hubble.main:main"  # old name, kept as an alias
+
+[tool.setuptools]
+packages = ["hubble"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

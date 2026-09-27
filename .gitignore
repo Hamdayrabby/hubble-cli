@@ -1,0 +1,29 @@
+# Environment variables (sensitive keys)
+.env
+.env.local
+*.env
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# Outputs
+available_models.json
+chat_*.md
+
+# Build artifacts
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# Editor/OS
+.idea/
+.vscode/
+Thumbs.db
