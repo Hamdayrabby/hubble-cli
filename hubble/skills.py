@@ -65,7 +65,9 @@ def _parse(path: Path) -> tuple:
 
 
 def _skill_dirs(root: Path) -> List[tuple]:
-    return [(HOME_DIR / "skills", "user"), (root / ".hubble" / "skills", "project")]
+    from hubble.plugins import plugin_dirs
+    return ([(HOME_DIR / "skills", "user")] + [(d / "skills", f"plugin:{n}") for n, d in plugin_dirs(root)]
+            + [(root / ".hubble" / "skills", "project")])
 
 
 def discover_skills(root: Path) -> List[Skill]:

@@ -151,6 +151,12 @@ def load_settings(root: Path, overrides: Optional[Dict[str, Any]] = None,
     for path in (root / ".hubble" / "settings.json", root / ".hubble" / "settings.local.json"):
         settings = _merge(settings, _filter_project(_read_json(path), trusted, ignored))
     settings["_ignored_project_keys"] = sorted(set(ignored))
+    from hubble.plugins import plugin_settings
+    plugin_hooks, plugin_servers = plugin_settings(root, trusted)
+    for event, entries in plugin_hooks.items():
+        settings["hooks"] = {**settings.get("hooks", {}), event: list(settings.get("hooks", {}).get(event, [])) + entries}
+    if plugin_servers:
+        settings["mcp_servers"] = {**plugin_servers, **settings.get("mcp_servers", {})}
     settings = _merge(settings, {k: v for k, v in (overrides or {}).items() if v is not None})
 
     env: Dict[str, str] = {}

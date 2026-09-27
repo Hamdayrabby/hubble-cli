@@ -154,6 +154,9 @@ class Repl:
         r("export", self.cmd_export, "Export conversation to markdown", ("copy",), "[file]")
         r("skills", self.cmd_skills, "List skills (the model can also call these on its own)")
         r("skill", self.cmd_skill_new, "Create a new skill template to fill in", args="new <name> [user]")
+        r("agents", self.cmd_agents, "List custom sub-agents, or create one", ("agent",), "[new <name> [user]]")
+        r("plugin", self.cmd_plugin, "List, install, remove, enable or disable plugins", ("plugins",),
+          "[list|install <src>|remove <name>]")
 
     def _load_custom_commands(self):
         """Skills become /<name>; a skill's own description is shown in /help and /<tab>."""
@@ -161,7 +164,10 @@ class Repl:
             self._register(skill.name, self._make_skill_runner(skill),
                            f"(skill, {skill.scope}) {skill.description}", args=skill.args_hint or "[args]")
         # Back-compat: a plain command with no frontmatter, e.g. from an older .hubble/commands/ setup.
-        for folder in (HOME_DIR / "commands", self.agent.ctx.root / ".hubble" / "commands"):
+        from hubble.plugins import plugin_dirs
+        folders = ([HOME_DIR / "commands"] + [d / "commands" for _, d in plugin_dirs(self.agent.ctx.root)]
+                   + [self.agent.ctx.root / ".hubble" / "commands"])
+        for folder in folders:
             if not folder.is_dir():
                 continue
             for f in sorted(folder.glob("*.md")):
@@ -866,6 +872,71 @@ class Repl:
         for s in self.agent.skills:
             console.print(f"  [bold]/{s.name}[/bold] [dim]({s.scope})[/dim]  {escape(s.description)}")
         console.print("[dim]Run one with /<name>, or the model calls them on its own when relevant.[/dim]")
+
+    def cmd_agents(self, arg):
+        from hubble.subagents import TEMPLATE as AGENT_TEMPLATE
+        parts = arg.split()
+        if parts and parts[0] == "new":
+            if len(parts) < 2 or not re.match(r"^[a-z0-9][a-z0-9_-]{0,40}$", parts[1].lower()):
+                console.print("Usage: /agents new <name> [user]  (lowercase letters, digits, - or _)")
+                return
+            name = parts[1].lower()
+            base = HOME_DIR / "agents" if len(parts) > 2 and parts[2] == "user" else \
+                self.agent.ctx.root / ".hubble" / "agents"
+            path = base / f"{name}.md"
+            if path.exists():
+                console.print(f"[yellow]Already exists: {escape(str(path))}[/yellow]")
+                return
+            base.mkdir(parents=True, exist_ok=True)
+            path.write_text(AGENT_TEMPLATE.format(name=name), encoding="utf-8")
+            self.agent.reload_agents()
+            console.print(f"[green]Created {escape(str(path))}[/green] [dim]— write its description and prompt; "
+                          "the model delegates to it with the task tool.[/dim]")
+            return
+        if not self.agent.agent_defs:
+            console.print("[dim]No custom agents. /agents new <name> creates one in .hubble/agents/.[/dim]")
+            return
+        for a in self.agent.agent_defs:
+            extra = ", ".join(x for x in (a.capability, a.model and f"model {a.model}",
+                                          a.tools and f"tools: {', '.join(a.tools)}") if x)
+            console.print(f"  [bold]{escape(a.name)}[/bold] [dim]({escape(a.scope)}; {escape(extra)})[/dim]  "
+                          f"{escape(a.description)}")
+        console.print("[dim]The model picks one with the task tool; or ask: \"use the <name> agent to ...\"[/dim]")
+
+    def cmd_plugin(self, arg):
+        from hubble import plugins
+        parts = arg.split()
+        root = self.agent.ctx.root
+        sub = parts[0] if parts else "list"
+        try:
+            if sub == "install" and len(parts) >= 2:
+                scope = "project" if "--project" in parts else "user"
+                info = plugins.install(parts[1], root, scope)
+                bits = [f"hooks: {', '.join(info['hooks'])}" if info["hooks"] else "",
+                        f"MCP servers: {', '.join(info['mcp_servers'])}" if info["mcp_servers"] else ""]
+                console.print(f"[green]Installed plugin {escape(info['name'])} {escape(info['version'])}[/green] "
+                              f"[dim]({escape(str(info['path']))}{'; ' + '; '.join(b for b in bits if b) if any(bits) else ''})."
+                              " Restart hubble to load it.[/dim]")
+            elif sub in ("remove", "uninstall") and len(parts) >= 2:
+                ok = plugins.remove(parts[1], root)
+                console.print(f"[green]Removed {escape(parts[1])}.[/green] [dim]Restart to unload it.[/dim]" if ok
+                              else f"[yellow]No plugin named {escape(parts[1])}.[/yellow]")
+            elif sub in ("enable", "disable") and len(parts) >= 2:
+                plugins.set_enabled(parts[1], sub == "enable")
+                console.print(f"[green]{escape(parts[1])} {sub}d.[/green] [dim]Restart to apply.[/dim]")
+            elif sub == "list":
+                items = plugins.installed_plugins(root, include_disabled=True)
+                if not items:
+                    console.print("[dim]No plugins. /plugin install <folder|git-url> [--project][/dim]")
+                for p in items:
+                    state = "" if p["enabled"] else " [yellow]disabled[/yellow]"
+                    console.print(f"  [bold]{escape(p['name'])}[/bold] {escape(p['version'])} [dim]({p['scope']})"
+                                  f"[/dim]{state}  {escape(p['description'])}")
+            else:
+                console.print("Usage: /plugin [list | install <folder|git-url> [--project] | remove <name> | "
+                              "enable <name> | disable <name>]")
+        except plugins.PluginError as e:
+            console.print(f"[red]{escape(str(e))}[/red]")
 
     def cmd_skill_new(self, arg):
         parts = arg.split()

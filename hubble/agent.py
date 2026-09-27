@@ -104,6 +104,8 @@ class Agent:
         self.pinned: Dict[str, str] = {}
         self.memory = load_memory(ctx.root)
         self.skills: List[Skill] = discover_skills(ctx.root) if tools is None else []
+        from hubble.subagents import discover_agents
+        self.agent_defs = discover_agents(ctx.root) if tools is None else []
         self.tools = tools if tools is not None else (
             default_tools() + web_tools(settings) + mcp_tools(settings, ctx.root, events)
             + [TaskTool(self), WriteSkillTool()] + ([SkillTool(self.skills)] if self.skills else []))
@@ -165,6 +167,10 @@ class Agent:
                 return
         if self.skills:
             self.tools.append(SkillTool(self.skills))
+
+    def reload_agents(self):
+        from hubble.subagents import discover_agents
+        self.agent_defs = discover_agents(self.ctx.root)
 
     def reload_memory(self):
         self.memory = load_memory(self.ctx.root)
@@ -341,10 +347,12 @@ class Agent:
             if c.name != "task":
                 continue
             try:
-                if parse_arguments(c.arguments).get("capability") == "edit":
-                    return False
+                a = parse_arguments(c.arguments)
             except ValueError:
-                pass
+                continue
+            spec = next((d for d in self.agent_defs if d.name == str(a.get("agent", "")).lower()), None)
+            if a.get("capability") == "edit" or (spec and spec.capability == "edit"):
+                return False
         return True
 
     def _execute_parallel(self, calls: List[ToolCall]) -> List[str]:
@@ -548,7 +556,7 @@ _task_ids = itertools.count(1)
 
 class TaskTool(Tool):
     name = "task"
-    description = ("Launch a sub-agent for a self-contained piece of work. Two capabilities:\n"
+    BASE_DESCRIPTION = ("Launch a sub-agent for a self-contained piece of work. Two capabilities:\n"
                    "- read_only (default): research that needs many searches or file reads (e.g. 'find "
                    "where auth tokens are validated and explain the flow'). Returns a written report. "
                    "Cannot edit files or run commands. Several read_only tasks in one turn run in parallel.\n"
@@ -558,24 +566,49 @@ class TaskTool(Tool):
                    "everything it needs to work without asking you follow-up questions -- it cannot ask.\n"
                    "Use this to parallelize independent research, or to delegate one well-scoped change "
                    "while you keep working on something else in the same turn.")
-    parameters = {"type": "object", "properties": {
-        "description": {"type": "string", "description": "3-5 word task label"},
-        "prompt": {"type": "string", "description": "Detailed, self-contained instructions for the sub-agent"},
-        "capability": {"type": "string", "enum": ["read_only", "edit"],
-                      "description": "read_only (default) or edit"},
-        "model": {"type": "string", "description": "Model for this sub-agent (default: same as you)"},
-    }, "required": ["description", "prompt"]}
     kind = "read"
 
     def __init__(self, parent: Agent):
         self.parent = parent
+
+    def _defs(self):
+        return {a.name: a for a in (getattr(self.parent, "agent_defs", None) or [])}
+
+    @property
+    def parameters(self):
+        props = {
+            "description": {"type": "string", "description": "3-5 word task label"},
+            "prompt": {"type": "string", "description": "Detailed, self-contained instructions for the sub-agent"},
+            "capability": {"type": "string", "enum": ["read_only", "edit"],
+                           "description": "read_only (default) or edit"},
+            "model": {"type": "string", "description": "Model for this sub-agent (default: same as you)"},
+        }
+        defs = self._defs()
+        if defs:
+            props["agent"] = {"type": "string", "enum": sorted(defs),
+                              "description": "Use a named specialist agent (its own prompt, tools and model)"}
+        return {"type": "object", "properties": props, "required": ["description", "prompt"]}
+
+    @property
+    def description(self):
+        defs = self._defs()
+        if not defs:
+            return self.BASE_DESCRIPTION
+        lines = "\n".join(f"- {a.name}: {a.description}" for a in defs.values())
+        return (self.BASE_DESCRIPTION + "\nNamed specialist agents (pass `agent`; their capability, tools "
+                "and model come from their definition):\n" + lines)
 
     def target(self, args):
         return args.get("description", "")
 
     def run(self, args, ctx):
         p = self.parent
-        edit = args.get("capability") == "edit"
+        spec = None
+        if args.get("agent"):
+            spec = self._defs().get(str(args["agent"]).lower())
+            if spec is None:
+                raise ToolError(f"no agent named '{args['agent']}'. Available: {', '.join(self._defs()) or '(none)'}")
+        edit = (spec.capability if spec else args.get("capability")) == "edit"
         sub_ctx = ToolContext(root=ctx.root, extra_dirs=ctx.extra_dirs, allow_secrets=ctx.allow_secrets,
                               shell_argv=ctx.shell_argv, shell_timeout=ctx.shell_timeout,
                               sandbox=ctx.sandbox, sandbox_image=ctx.sandbox_image,
@@ -601,10 +634,21 @@ class TaskTool(Tool):
             system = ("You are a read-only research sub-agent inside Hubble. Use the tools to investigate "
                       f"the workspace at {ctx.root} and answer the task. Finish with a concise, factual "
                       "report citing path:line. You cannot edit files or run commands.")
-        label = args.get("description") or "task"
+        if spec:
+            if spec.tools:
+                # A definition narrows the capability's toolset; it never widens it (a read_only
+                # agent listing write_file still does not get it).
+                tools = [t for t in tools if t.name in spec.tools]
+            tool_names = ", ".join(t.name for t in tools) or "(none)"
+            system = (f"{spec.prompt}\n\n---\nYou are the '{spec.name}' sub-agent inside Hubble, working in "
+                      f"{ctx.root}. Your tools: {tool_names}. You cannot ask the user anything; make "
+                      "reasonable assumptions and state them. End with a concise final report.")
+        label = args.get("description") or (spec.name if spec else "task")
+        if spec:
+            label = f"{spec.name}: {label}"
         key = f"task-{next(_task_ids)}"
         p.events.subagent_start(key, label)
-        model = args.get("model") or p.model
+        model = args.get("model") or (spec.model if spec else "") or p.model
         sub = Agent(p.provider, {**p.settings, "model": model, "max_turns": 30 if edit else 20,
                                 "auto_compact_ratio": 0},
                     sub_ctx, perms, _SubagentEvents(p.events, label, key), tools=tools, system_override=system)
