@@ -1,5 +1,6 @@
 """Terminal rendering: streamed markdown, tool call lines, diffs and approval prompts."""
 
+import json
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -374,6 +375,57 @@ class HeadlessEvents(Events):
                               "Use --permission-mode accept-edits/yolo or allow rules.[/yellow]")
         return "no", ("This action needs user approval, which is unavailable in non-interactive mode. "
                       "Do not retry it; finish what you can and report what remains.")
+
+
+class StreamJsonEvents(HeadlessEvents):
+    """For `-p --output-format stream-json`: one JSON object per line on stdout, as things happen.
+
+    Line types: init, text (a streamed delta), assistant (one finished model call), tool_use,
+    tool_result, todos, notice, subagent_start, subagent_end, result (always last).
+    """
+
+    def __init__(self, include_deltas: bool = True):
+        super().__init__(stream_text=False, quiet=True)
+        self.include_deltas = include_deltas
+
+    @staticmethod
+    def emit(obj: Dict[str, Any]):
+        sys.stdout.write(json.dumps(obj, ensure_ascii=False, default=str) + "\n")
+        sys.stdout.flush()
+
+    def text(self, delta):
+        if self.include_deltas and delta:
+            self.emit({"type": "text", "delta": delta})
+
+    def turn_end(self, result):
+        if not (result.text or result.tool_calls):
+            return
+        self.emit({"type": "assistant", "text": result.text, "finish_reason": result.finish_reason,
+                   "tool_calls": [{"id": c.id, "name": c.name, "arguments": c.arguments} for c in result.tool_calls],
+                   "usage": result.usage})
+
+    def tool_start(self, tool, args):
+        self.emit({"type": "tool_use", "tool": tool.name, "args": args})
+
+    def tool_result(self, tool, args, output, is_error):
+        self.emit({"type": "tool_result", "tool": tool.name, "is_error": is_error, "output": output[:20000]})
+
+    def todos(self, todos):
+        self.emit({"type": "todos", "todos": todos})
+
+    def notice(self, message, level="info"):
+        self.emit({"type": "notice", "level": level, "message": message})
+
+    def subagent_start(self, key, label):
+        self.emit({"type": "subagent_start", "id": key, "label": label})
+
+    def subagent_end(self, key, status, detail=""):
+        self.emit({"type": "subagent_end", "id": key, "status": status, "detail": detail})
+
+    def ask(self, tool, args, preview):
+        self.emit({"type": "notice", "level": "warn",
+                   "message": f"denied (needs approval): {tool.name} {describe_call(tool, args)}"})
+        return super().ask(tool, args, preview)
 
 
 def pick(title: str, items: List[Tuple[Any, str, str]], current: Any = None, max_visible: int = 14) -> Any:

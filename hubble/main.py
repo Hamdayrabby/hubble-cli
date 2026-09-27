@@ -36,7 +36,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--permission-mode", choices=MODES, help="default | accept-edits | plan | yolo")
     p.add_argument("--yolo", action="store_true", help="shortcut for --permission-mode yolo (no approvals)")
     p.add_argument("--persona", choices=list(PERSONAS), help="system persona")
-    p.add_argument("--output-format", choices=["text", "json"], default="text", help="output format for -p")
+    p.add_argument("--output-format", choices=["text", "json", "stream-json"], default="text",
+                   help="output format for -p (stream-json: one JSON event per line as it happens)")
     p.add_argument("--max-turns", type=int, help="max model calls per prompt")
     p.add_argument("--cwd", help="workspace root (default: current directory)")
     p.add_argument("--base-url", help="API base URL")
@@ -259,12 +260,14 @@ def _resume(args, store, agent, console):
 
 def run_headless(args, settings, provider, ctx, perms, store, prompt, fallback_client=None) -> int:
     from hubble.agent import Agent
-    from hubble.ui import HeadlessEvents
+    from hubble.ui import HeadlessEvents, StreamJsonEvents
 
     if not prompt.strip():
         print("hubble: -p needs a prompt (argument or stdin)", file=sys.stderr)
         return 2
-    events = HeadlessEvents(stream_text=args.output_format == "text", quiet=args.quiet)
+    streaming = args.output_format == "stream-json"
+    events = StreamJsonEvents() if streaming else HeadlessEvents(stream_text=args.output_format == "text",
+                                                                 quiet=args.quiet)
     agent = Agent(provider, settings, ctx, perms, events)
     agent.fallback_client = fallback_client
     agent.fallback_resolver = _headless_resolver(settings, getattr(args, "_providers", {}), agent)
@@ -281,19 +284,26 @@ def run_headless(args, settings, provider, ctx, perms, store, prompt, fallback_c
     if agent.session is None and not args.no_session:
         agent.session = store.new(agent.model)
 
+    if streaming:
+        events.emit({"type": "init", "session_id": agent.session.id if agent.session else None,
+                     "model": agent.model, "provider": agent.provider_name, "cwd": str(ctx.root),
+                     "permission_mode": perms.mode, "tools": [t.name for t in agent.tools]})
     agent.start_session("resume" if agent.messages else "startup")
     result = agent.run(prompt)
     agent.shutdown()
     stats = agent.last_stats
     is_error = bool(stats.error) or stats.interrupted
-    if args.output_format == "json":
-        print(json.dumps({
-            "result": result, "is_error": is_error, "error": stats.error,
-            "session_id": agent.session.id if agent.session else None, "model": agent.model,
-            "num_model_calls": stats.model_calls, "num_tool_calls": stats.tool_calls,
-            "usage": {"prompt_tokens": stats.prompt_tokens, "completion_tokens": stats.completion_tokens},
-            "duration_s": round(stats.duration, 2),
-        }, ensure_ascii=False, indent=2))
+    summary = {
+        "result": result, "is_error": is_error, "error": stats.error,
+        "session_id": agent.session.id if agent.session else None, "model": agent.model,
+        "num_model_calls": stats.model_calls, "num_tool_calls": stats.tool_calls,
+        "usage": {"prompt_tokens": stats.prompt_tokens, "completion_tokens": stats.completion_tokens},
+        "duration_s": round(stats.duration, 2),
+    }
+    if streaming:
+        events.emit({"type": "result", **summary})
+    elif args.output_format == "json":
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 1 if is_error else 0
 
 
