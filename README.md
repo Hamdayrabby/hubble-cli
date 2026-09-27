@@ -56,9 +56,10 @@ hubble --test codestral-latest           # check that a model responds
 | `glob` | Find files by pattern, newest first |
 | `list_dir` | List a directory |
 | `todo_write` | Task list for multi-step work, shown in the terminal |
-| `task` | Read-only sub-agent for broad research; returns a report |
+| `task` | Sub-agent for one self-contained piece of work: `read_only` (default) for research, returns a report; `edit` for a delegated implementation task, with its own file/shell tools — its edits and commands still ask for approval the same way yours would. Several `read_only` tasks in one turn run in parallel; an `edit` task always runs on its own. Can target a different model per task. |
 | `web_search` | Web search. DuckDuckGo by default (no key); set `BRAVE_API_KEY` or `TAVILY_API_KEY` to use those instead |
 | `web_fetch` | Fetch a URL as readable text, page by page (`offset`). Asks once per domain; refuses local and private addresses |
+| `mcp__<server>__<tool>` | Tools from any MCP server you've configured (see [MCP servers](#mcp-servers) below) |
 
 Safety:
 - **Workspace confinement:** paths outside the workspace are refused. Add others with `additional_dirs`.
@@ -95,6 +96,54 @@ inside it. Memory and CPU are capped, and the container is removed after every c
 install-style commands. Like `permission_mode`, `shell_sandbox` and `sandbox_network` only take effect from
 a project's own `.hubble/settings.json` once you've trusted that folder — an untrusted, freshly cloned
 project can't quietly turn sandboxing off or re-enable network access on your behalf.
+
+### MCP servers
+
+Connect any [MCP](https://modelcontextprotocol.io/) server (stdio transport only — SSE/HTTP servers
+aren't supported yet) and its tools become available to the model, namespaced as `mcp__<server>__<tool>`:
+
+```json
+{
+  "mcp_servers": {
+    "filesystem": {"command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/path/to/share"]},
+    "git": {"command": ["uvx", "mcp-server-git"]}
+  }
+}
+```
+A server that fails to start or handshake is skipped with a warning, not a crash. Like the sandbox
+settings, `mcp_servers` only takes effect from a project's own `.hubble/settings.json` once you've trusted
+that folder — a cloned repo can't have you unknowingly launch arbitrary processes.
+
+### Hooks
+
+Hooks are shell commands that run at fixed points in the agent loop, independent of the model's own
+choices — for enforcing project policy, logging, or linting. Configure them in `settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [{"matcher": "shell", "command": "python .hubble/check_command.py"}],
+    "PostToolUse": [{"matcher": "edit_file", "command": "python .hubble/lint_changed_file.py"}],
+    "UserPromptSubmit": [{"command": "python .hubble/inject_context.py"}],
+    "Stop": [{"command": "python .hubble/require_tests_ran.py"}]
+  }
+}
+```
+Each hook receives a JSON payload on stdin — `{"event": "PreToolUse", "tool": "edit_file", "args": {...}}`
+for tool events, `{"event": "UserPromptSubmit", "prompt": "..."}`, or `{"event": "Stop", "final_text": "..."}`
+— and reads whatever it needs (e.g. `args["path"]`) from there, not from shell variables. It controls what
+happens next through its exit code and stdout:
+- **Exit non-zero** → blocks the action; stderr becomes the reason shown to the model.
+- **Print `{"decision": "block", "reason": "..."}`** → same, from an exit-0 process.
+- **Print `{"additionalContext": "..."}`** → the action proceeds, and the text is appended (to the prompt
+  for `UserPromptSubmit`, to the tool's result for `PostToolUse`).
+- **`Stop` hooks** can refuse to let the turn end (`"decision": "block"`) — the reason is fed back as if it
+  were a new instruction, so the model keeps going (e.g. "you haven't run the tests yet").
+- Anything else on stdout is just logged, not acted on.
+
+`matcher` filters by tool name (glob, e.g. `"shell"` or `"mcp__*"`); omit it to run on every event of that
+type. Hooks run on the host, not inside the Docker sandbox, and — like `mcp_servers` — only take effect
+once you've trusted the project.
 
 ## Permission modes
 

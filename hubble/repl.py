@@ -144,6 +144,8 @@ class Repl:
         r("thinking", self.cmd_thinking, "Show or hide the model's reasoning text", args="[on|off]")
         r("sandbox", self.cmd_sandbox, "Run shell commands in an isolated Docker container instead of "
           "directly on this machine", args="[on|off]")
+        r("mcp", self.cmd_mcp, "List configured MCP servers and their tools")
+        r("hooks", self.cmd_hooks, "List configured hooks")
         r("config", self.cmd_config, "Show effective settings and allow/deny rules")
         r("export", self.cmd_export, "Export conversation to markdown", ("copy",), "[file]")
         r("skills", self.cmd_skills, "List skills (the model can also call these on its own)")
@@ -394,6 +396,7 @@ class Repl:
                     break
             except KeyboardInterrupt:
                 console.print("[yellow]Interrupted.[/yellow]")
+        self.agent.shutdown()
         console.print("[dim]Bye.[/dim]")
 
     def handle(self, text: str):
@@ -906,6 +909,33 @@ class Repl:
                           f"{ctx.sandbox_memory} mem, {ctx.sandbox_cpus} cpu, {net})[/dim]")
         else:
             console.print("[yellow]Sandbox: off[/yellow] [dim](shell commands run directly on this machine)[/dim]")
+
+    def cmd_mcp(self, arg):
+        from hubble.mcp import MCPTool
+        by_server: Dict[str, List[str]] = {}
+        for t in self.agent.tools:
+            if isinstance(t, MCPTool):
+                by_server.setdefault(t.client.config.name, []).append(t.tool_name)
+        configured = (self.agent.settings.get("mcp_servers") or {}).keys()
+        if not configured:
+            console.print("[dim]No MCP servers configured. Add one to mcp_servers in settings.json.[/dim]")
+            return
+        for name in configured:
+            tools = by_server.get(name)
+            if tools:
+                console.print(f"  [green]{escape(name)}[/green]  {len(tools)} tool(s): {escape(', '.join(tools))}")
+            else:
+                console.print(f"  [red]{escape(name)}[/red]  not connected")
+
+    def cmd_hooks(self, arg):
+        hooks = self.agent.settings.get("hooks") or {}
+        if not hooks:
+            console.print("[dim]No hooks configured. Add them under 'hooks' in settings.json.[/dim]")
+            return
+        for event, entries in hooks.items():
+            for entry in entries:
+                matcher = entry.get("matcher") or "*"
+                console.print(f"  [bold]{escape(event)}[/bold] [dim]({escape(matcher)})[/dim]  {escape(entry.get('command', ''))}")
 
     def cmd_temp(self, arg):
         if not arg:

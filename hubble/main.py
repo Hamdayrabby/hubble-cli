@@ -282,6 +282,7 @@ def run_headless(args, settings, provider, ctx, perms, store, prompt, fallback_c
         agent.session = store.new(agent.model)
 
     result = agent.run(prompt)
+    agent.shutdown()
     stats = agent.last_stats
     is_error = bool(stats.error) or stats.interrupted
     if args.output_format == "json":

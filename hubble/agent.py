@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+from hubble.hooks import HookRunner
 from hubble.permissions import Permissions
 from hubble.prompts import COMPACT_PROMPT, build_system_prompt, load_memory
 from hubble.provider import OpenAICompatProvider, ProviderError, ToolCall, TurnResult, parse_arguments
@@ -18,6 +19,13 @@ from hubble.session import Session, repair_history
 from hubble.skills import Skill, SkillTool, WriteSkillTool, discover_skills, skills_prompt_block
 from hubble.tools import (READ_ONLY_TOOL_NAMES, Tool, ToolContext, ToolError, default_tools, run_tool,
                             shell_name, truncate)
+
+
+def mcp_tools(settings: Dict[str, Any], root, events=None) -> List[Tool]:
+    if not settings.get("mcp_servers"):
+        return []
+    from hubble.mcp import load_mcp_servers
+    return load_mcp_servers(settings, root, events)
 
 
 def web_tools(settings: Dict[str, Any]) -> List[Tool]:
@@ -97,8 +105,9 @@ class Agent:
         self.memory = load_memory(ctx.root)
         self.skills: List[Skill] = discover_skills(ctx.root) if tools is None else []
         self.tools = tools if tools is not None else (
-            default_tools() + web_tools(settings) + [TaskTool(self), WriteSkillTool()]
-            + ([SkillTool(self.skills)] if self.skills else []))
+            default_tools() + web_tools(settings) + mcp_tools(settings, ctx.root, events)
+            + [TaskTool(self), WriteSkillTool()] + ([SkillTool(self.skills)] if self.skills else []))
+        self.hooks = HookRunner(settings.get("hooks") or {}, ctx.root, ctx.shell_argv, events)
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
         self.context_tokens = 0
@@ -106,6 +115,11 @@ class Agent:
         # Shared with sub-agents so Ctrl+C stops every thread of a parallel batch.
         self.cancel = threading.Event()
         self.is_subagent = False
+
+    def shutdown(self):
+        """Stop any MCP server subprocesses this agent started. Call once, on exit."""
+        from hubble.mcp import stop_mcp_clients
+        stop_mcp_clients(self.tools)
 
     # ----- state helpers -------------------------------------------------
 
@@ -174,6 +188,13 @@ class Agent:
         self.last_stats = stats
         if not self.is_subagent:
             self.cancel.clear()
+        hook = self.hooks.run("UserPromptSubmit", {"prompt": prompt})
+        if hook.decision == "block":
+            self.events.notice(f"Blocked by hook: {hook.reason}", "warn")
+            stats.error = hook.reason
+            return ""
+        if hook.additional_context:
+            prompt = f"{prompt}\n\n<hook-context>\n{hook.additional_context}\n</hook-context>"
         self.ctx.begin_turn()
         self.add_user_message(prompt)
         try:
@@ -249,6 +270,13 @@ class Agent:
                     reason = f" (finish_reason={result.finish_reason})" if result.finish_reason else ""
                     self.events.notice(f"{self.model} returned an empty response{reason}. Try again, ask "
                                        "differently, or switch model with /model.", "warn")
+                    return result.text
+                if result.finish_reason != "length":
+                    stop = self.hooks.run("Stop", {"final_text": result.text})
+                    if stop.decision == "block":
+                        self.events.notice(f"Hook says keep going: {stop.reason}", "dim")
+                        self._append({"role": "user", "content": stop.reason})
+                        continue
                 return result.text
 
             if self._parallel_ok(result.tool_calls):
@@ -287,11 +315,22 @@ class Agent:
             return client.stream(fallback, messages, **kwargs)
 
     def _parallel_ok(self, calls: List[ToolCall]) -> bool:
-        """Several sub-agent tasks in one turn run concurrently. They are read-only and never
-        prompt for approval, so running them on threads is safe."""
+        """Several sub-agent tasks in one turn run concurrently, as long as none of them can
+        edit -- an edit-capable sub-agent may need to ask the user something mid-run, and
+        overlapping approval prompts on one terminal is not something to risk."""
         tools = self.tools_by_name
-        return (len(calls) > 1 and any(c.name == "task" for c in calls)
-                and all(c.name in tools and tools[c.name].kind == "read" for c in calls))
+        if not (len(calls) > 1 and any(c.name == "task" for c in calls)
+                and all(c.name in tools and tools[c.name].kind == "read" for c in calls)):
+            return False
+        for c in calls:
+            if c.name != "task":
+                continue
+            try:
+                if parse_arguments(c.arguments).get("capability") == "edit":
+                    return False
+            except ValueError:
+                pass
+        return True
 
     def _execute_parallel(self, calls: List[ToolCall]) -> List[str]:
         self.events.batch_start(len(calls))
@@ -354,6 +393,12 @@ class Agent:
             self.events.tool_result(tool, {}, output, True)
             return output
 
+        pre = self.hooks.run("PreToolUse", {"tool": tool.name, "args": args}, name=tool.name)
+        if pre.decision == "block":
+            output = f"Blocked by hook: {pre.reason}"
+            self.events.tool_result(tool, args, output, True)
+            return output
+
         target = tool.target(args)
         if tool.kind != "exec" and tool.name not in ("task", "todo_write") and target:
             # Match rules against the canonical workspace-relative path, not the raw argument,
@@ -391,6 +436,10 @@ class Agent:
 
         self.events.tool_start(tool, args)
         output, is_error = run_tool(tool, args, self.ctx)
+        post = self.hooks.run("PostToolUse", {"tool": tool.name, "args": args, "output": output,
+                                              "is_error": is_error}, name=tool.name)
+        if post.additional_context:
+            output += f"\n\n<hook-context>\n{post.additional_context}\n</hook-context>"
         self.events.tool_result(tool, args, output, is_error)
         if tool.name == "todo_write" and not is_error:
             self.events.todos(self.ctx.todos)
@@ -465,18 +514,35 @@ class _SubagentEvents(Events):
         if level in ("warn", "error"):
             self.parent.notice(f"  ↳ {self.label}: {message}", level)
 
+    def ask(self, tool, args, preview):
+        # An edit-capable sub-agent's edits/commands still ask the real user, through the same
+        # UI -- edit-batches are never parallelized (see _parallel_ok), so this is always safe
+        # to call from the main thread, never from a background worker.
+        self.parent.notice(f"  ↳ {self.label} wants to:", "dim")
+        return self.parent.ask(tool, args, preview)
+
 
 _task_ids = itertools.count(1)
 
 
 class TaskTool(Tool):
     name = "task"
-    description = ("Launch a read-only sub-agent to research a question that needs many searches or file "
-                   "reads (e.g. 'find where auth tokens are validated and explain the flow'). It returns a "
-                   "written report. It cannot edit files or run commands.")
+    description = ("Launch a sub-agent for a self-contained piece of work. Two capabilities:\n"
+                   "- read_only (default): research that needs many searches or file reads (e.g. 'find "
+                   "where auth tokens are validated and explain the flow'). Returns a written report. "
+                   "Cannot edit files or run commands. Several read_only tasks in one turn run in parallel.\n"
+                   "- edit: a self-contained implementation task with its own file/shell tools (e.g. "
+                   "'add input validation to the signup form in src/signup.py'). Its edits and commands "
+                   "still go through the same approval you would see if you did them yourself. Give it "
+                   "everything it needs to work without asking you follow-up questions -- it cannot ask.\n"
+                   "Use this to parallelize independent research, or to delegate one well-scoped change "
+                   "while you keep working on something else in the same turn.")
     parameters = {"type": "object", "properties": {
         "description": {"type": "string", "description": "3-5 word task label"},
         "prompt": {"type": "string", "description": "Detailed, self-contained instructions for the sub-agent"},
+        "capability": {"type": "string", "enum": ["read_only", "edit"],
+                      "description": "read_only (default) or edit"},
+        "model": {"type": "string", "description": "Model for this sub-agent (default: same as you)"},
     }, "required": ["description", "prompt"]}
     kind = "read"
 
@@ -488,19 +554,39 @@ class TaskTool(Tool):
 
     def run(self, args, ctx):
         p = self.parent
+        edit = args.get("capability") == "edit"
         sub_ctx = ToolContext(root=ctx.root, extra_dirs=ctx.extra_dirs, allow_secrets=ctx.allow_secrets,
-                              shell_argv=ctx.shell_argv, shell_timeout=ctx.shell_timeout)
-        # Read-only tools plus web search; web_fetch needs per-domain approval, which sub-agents cannot ask for.
-        tools = [t for t in default_tools() + web_tools(p.settings) if t.name in READ_ONLY_TOOL_NAMES | {"web_search"}]
-        system = ("You are a read-only research sub-agent inside Hubble. Use the tools to investigate the "
-                  f"workspace at {ctx.root} and answer the task. Finish with a concise, factual report citing "
-                  "path:line. You cannot edit files or run commands.")
+                              shell_argv=ctx.shell_argv, shell_timeout=ctx.shell_timeout,
+                              sandbox=ctx.sandbox, sandbox_image=ctx.sandbox_image,
+                              sandbox_memory=ctx.sandbox_memory, sandbox_cpus=ctx.sandbox_cpus,
+                              sandbox_network=ctx.sandbox_network)
+        if edit:
+            # Full toolset except task/write_skill: an edit sub-agent does its own assigned job,
+            # it does not spawn further sub-agents or rewrite the project's skills.
+            tools = [t for t in default_tools() + web_tools(p.settings)
+                    if t.name not in ("task", "write_skill")]
+            perms = p.permissions  # same mode and rules as the parent: edits/commands ask the same way
+            system = ("You are an implementation sub-agent inside Hubble, working on one well-scoped task "
+                      f"delegated to you in the workspace at {ctx.root}. You have read_file, write_file, "
+                      "edit_file, shell, grep, glob, list_dir and todo_write. You cannot ask the user "
+                      "anything -- if the task is ambiguous, make the most reasonable choice and say what "
+                      "you assumed in your final report. Verify your change (run tests/a build) before "
+                      "finishing. Finish with a concise report of what you changed and how you verified it.")
+        else:
+            # Read-only tools plus web search; web_fetch needs per-domain approval, which sub-agents can't ask for.
+            tools = [t for t in default_tools() + web_tools(p.settings)
+                    if t.name in READ_ONLY_TOOL_NAMES | {"web_search"}]
+            perms = Permissions("plan", deny=p.permissions.deny)
+            system = ("You are a read-only research sub-agent inside Hubble. Use the tools to investigate "
+                      f"the workspace at {ctx.root} and answer the task. Finish with a concise, factual "
+                      "report citing path:line. You cannot edit files or run commands.")
         label = args.get("description") or "task"
         key = f"task-{next(_task_ids)}"
         p.events.subagent_start(key, label)
-        sub = Agent(p.provider, {**p.settings, "model": p.model, "max_turns": 20, "auto_compact_ratio": 0},
-                    sub_ctx, Permissions("plan", deny=p.permissions.deny),
-                    _SubagentEvents(p.events, label, key), tools=tools, system_override=system)
+        model = args.get("model") or p.model
+        sub = Agent(p.provider, {**p.settings, "model": model, "max_turns": 30 if edit else 20,
+                                "auto_compact_ratio": 0},
+                    sub_ctx, perms, _SubagentEvents(p.events, label, key), tools=tools, system_override=system)
         sub.cancel = p.cancel
         sub.is_subagent = True
         # Same provider and fallback route as the parent (it may have switched provider mid-session).
