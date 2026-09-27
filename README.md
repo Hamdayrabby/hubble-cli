@@ -1,33 +1,45 @@
-# Hubble (v4)
+# Hubble
 
-An agentic coding CLI in the style of Claude Code, Antigravity/Gemini CLI and Codex CLI, built for the
-OpenAI-compatible gateway at **`https://aihub.071129.xyz/`**. The model works directly in your repository:
-it searches, reads and edits files and runs commands through native function calling, and you approve
-each action.
+An agentic coding CLI in the style of Claude Code, Antigravity/Gemini CLI and Codex CLI. It works directly
+in your repository: it searches, reads and edits files and runs commands through native function calling,
+and you approve each action. It talks to any OpenAI-compatible API — the AIHub gateway by default, or
+OpenAI, Groq, OpenRouter, Mistral, a local Ollama server, or others via `/provider add`.
 
-## Quick start
+## Install
 
-```powershell
-cd "D:\Api playground\aihub"
-pip install -e .            # installs the `hubble` command (`aihub` still works) (deps: httpx, rich, prompt_toolkit)
-# put AIHUB_API_KEY=... in aihub\.env or ~/.aihub/.env
+```bash
+pipx install git+https://github.com/Hamdayrabby/hubble-cli.git
+```
+(or `pip install --user git+https://github.com/Hamdayrabby/hubble-cli.git` if you don't use pipx)
 
-cd D:\path\to\your\project
-hubble                       # interactive session in this folder
+Then just run it from any project:
+
+```bash
+cd /path/to/your/project
+hubble
 ```
 
-Without installing: `python code_cli.py [args]` from this folder (add `--cwd <project>` to work elsewhere).
-The previous single-file CLI is still available as `python chat_cli.py`.
+With no API key configured anywhere, the first run walks you through adding one — no manual `.env` editing
+required. To set one up yourself instead, put it in `.env` in your project or in `~/.hubble/.env`:
+```
+HUBBLE_API_KEY=your_key_here
+HUBBLE_BASE_URL=https://aihub.071129.xyz/v1   # or any other OpenAI-compatible base URL
+```
+
+**From a local clone**, for development: `pip install -e .` from the repo root installs the `hubble`
+command (`aihub` also works, kept as an alias) against your working copy — edits take effect immediately.
+Without installing at all: `python code_cli.py [args]` from the repo root (add `--cwd <project>` to work
+elsewhere). The original single-file prototype is still there as `python chat_cli.py`.
 
 ## Usage
 
-```powershell
+```bash
 hubble                                   # interactive REPL
 hubble "explain the architecture"        # REPL with a first prompt
 hubble -c                                # continue the latest session in this folder
 hubble -r                                # choose a session to resume
 hubble -p "fix the failing test" --permission-mode accept-edits --allow "shell(pytest*)"
-git diff | aihub -p "review this diff" --output-format json
+git diff | hubble -p "review this diff" --output-format json
 hubble -m nvidia/nemotron-3-super-120b-a12b --persona architect
 hubble --test codestral-latest           # check that a model responds
 ```
@@ -86,17 +98,17 @@ Allow rules never apply to chained commands (`&&`, `;`, `|`, redirects), so `she
 | `/resume [#\|id]` | Resume a saved session |
 | `/undo` | Revert files changed in the last turn that edited files |
 | `/diff` | Show `git diff` |
-| `/init` | Generate `AIHUB.md` project instructions |
+| `/init` | Generate `HUBBLE.md` project instructions |
 | `/memory` | Show loaded memory files |
 | `/add <file>`, `/drop <file>`, `/files` | Pin files into the system prompt |
 | `/todos`, `/cost`, `/context`, `/config`, `/test [model]`, `/temp [t]`, `/export [file]` | Info and utilities |
 | `@path` | Attach a file (or directory listing) to your message; Tab completes paths |
 | `!cmd` | Run a shell command yourself |
-| `#note` | Append a note to `./AIHUB.md` |
+| `#note` | Append a note to `./HUBBLE.md` |
 | Esc+Enter / Ctrl+J | New line |
 | Ctrl+C / Ctrl+D | Cancel turn / quit |
 
-**Custom commands:** `.aihub/commands/<name>.md` (project) or `~/.aihub/commands/<name>.md` (user) becomes
+**Custom commands:** `.hubble/commands/<name>.md` (project) or `~/.hubble/commands/<name>.md` (user) becomes
 `/<name>`. `$ARGUMENTS` is replaced by the text after the command.
 
 ## Providers (extra base URLs and API keys)
@@ -116,21 +128,21 @@ After that:
 - `hubble --provider <name>` picks a provider for one run.
 - On first start with no API key at all, the same setup runs instead of an error.
 
-Extra providers are stored in `~/.aihub/providers.json`, with their API keys in plain text, like a `.env` file.
-Their model lists are stored in `~/.aihub/models/<name>.json`. When a model is rate limited or down, Hubble retries that request with a fallback that the current provider actually has, in this order: the fallback you picked with `/fallback`, then `fallback_model` if the provider has it, then the provider's fastest verified model, then `fallback_model` on the built-in AIHub provider. Sub-agents use the same route. `/fallback off` disables it for a provider.
+Extra providers are stored in `~/.hubble/providers.json`, with their API keys in plain text, like a `.env` file.
+Their model lists are stored in `~/.hubble/models/<name>.json`. When a model is rate limited or down, Hubble retries that request with a fallback that the current provider actually has, in this order: the fallback you picked with `/fallback`, then `fallback_model` if the provider has it, then the provider's fastest verified model, then `fallback_model` on the built-in hubble provider. Sub-agents use the same route. `/fallback off` disables it for a provider.
 
 ## Project memory
 
-On startup the CLI loads `~/.aihub/AIHUB.md`, then one of `AIHUB.md`, `AGENTS.md`, `CLAUDE.md` or `GEMINI.md`
+On startup the CLI loads `~/.hubble/HUBBLE.md`, then one of `HUBBLE.md`, `AGENTS.md`, `CLAUDE.md` or `GEMINI.md`
 from each directory between the git root and the workspace, into the system prompt.
 
 ## Configuration
 
 Settings merge in order (later wins):
 1. Built-in defaults
-2. `~/.aihub/settings.json`
-3. `.aihub/settings.json`
-4. `.aihub/settings.local.json`
+2. `~/.hubble/settings.json`
+3. `.hubble/settings.json`
+4. `.hubble/settings.local.json`
 5. CLI flags
 
 ```json
@@ -153,20 +165,20 @@ Settings merge in order (later wins):
 - Deny rules win over allow rules.
 - `shell` can be `auto` (pwsh, then Windows PowerShell), `cmd` or `bash`.
 
-Project settings files (`.aihub/*.json`) come from the repository, so they are treated as untrusted:
+Project settings files (`.hubble/*.json`) come from the repository, so they are treated as untrusted:
 - They can never set `base_url` or `api_key`.
-- `permission_mode`, `allow_secret_files`, `additional_dirs`, `shell` and allow rules apply only after you trust the folder. The CLI asks once and remembers the answer in `~/.aihub/trusted_folders.json`.
+- `permission_mode`, `allow_secret_files`, `additional_dirs`, `shell` and allow rules apply only after you trust the folder. The CLI asks once and remembers the answer in `~/.hubble/trusted_folders.json`.
 - Deny rules always apply.
 
-Credentials come from `AIHUB_API_KEY` / `AIHUB_BASE_URL` in the environment, `aihub/.env` or `~/.aihub/.env`.
+Credentials come from `HUBBLE_API_KEY` / `HUBBLE_BASE_URL` in the environment, `.env` in your project, or `~/.hubble/.env`.
 Only `AIHUB_*` keys are read from those files.
 
-Sessions are saved as JSONL in `~/.aihub/projects/<project>/`. Input history is in `~/.aihub/history`.
+Sessions are saved as JSONL in `~/.hubble/projects/<project>/`. Input history is in `~/.hubble/history`.
 
 ## Layout
 
 ```
-aihubcli/
+hubble/
   main.py         CLI flags, headless -p mode, resume
   repl.py         prompt_toolkit REPL, slash commands, @mentions
   ui.py           rich rendering: streamed markdown, diffs, approval prompts
