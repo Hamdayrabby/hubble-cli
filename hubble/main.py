@@ -38,6 +38,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--persona", choices=list(PERSONAS), help="system persona")
     p.add_argument("--output-format", choices=["text", "json", "stream-json"], default="text",
                    help="output format for -p (stream-json: one JSON event per line as it happens)")
+    p.add_argument("--image", action="append", default=[], metavar="FILE",
+                   help="with -p: attach an image to the prompt (repeatable; needs a vision model)")
     p.add_argument("--max-turns", type=int, help="max model calls per prompt")
     p.add_argument("--cwd", help="workspace root (default: current directory)")
     p.add_argument("--base-url", help="API base URL")
@@ -288,8 +290,16 @@ def run_headless(args, settings, provider, ctx, perms, store, prompt, fallback_c
         events.emit({"type": "init", "session_id": agent.session.id if agent.session else None,
                      "model": agent.model, "provider": agent.provider_name, "cwd": str(ctx.root),
                      "permission_mode": perms.mode, "tools": [t.name for t in agent.tools]})
+    images = []
+    for f in getattr(args, "image", None) or []:
+        from hubble.images import ImageError, data_url
+        try:
+            images.append(data_url(Path(f).expanduser().resolve()))
+        except (ImageError, OSError) as e:
+            print(f"hubble: --image {f}: {e}", file=sys.stderr)
+            return 2
     agent.start_session("resume" if agent.messages else "startup")
-    result = agent.run(prompt)
+    result = agent.run(prompt, images or None)
     agent.shutdown()
     stats = agent.last_stats
     is_error = bool(stats.error) or stats.interrupted

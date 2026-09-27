@@ -40,9 +40,15 @@ def estimate_tokens(text: str) -> int:
 
 
 def estimate_messages(messages: List[Dict[str, Any]]) -> int:
+    from hubble.images import IMAGE_TOKEN_ESTIMATE, content_text, image_count
     total = 0
     for m in messages:
-        total += 4 + estimate_tokens(m.get("content") or "")
+        content = m.get("content") or ""
+        if isinstance(content, list):
+            total += 4 + estimate_tokens(content_text(content).replace("[image]", "")) + \
+                IMAGE_TOKEN_ESTIMATE * image_count(content)
+            continue
+        total += 4 + estimate_tokens(content)
         for tc in m.get("tool_calls") or []:
             total += estimate_tokens(tc["function"]["name"] + tc["function"]["arguments"])
     return total
@@ -191,12 +197,13 @@ class Agent:
         self.context_tokens = 0
         self.ctx.reset_state()
 
-    def add_user_message(self, content: str):
+    def add_user_message(self, content: str, images: Optional[List[str]] = None):
         # Mistral rejects a user message directly after a tool result (turn cut short by an
         # interrupt, error or max_turns), so close the previous turn first.
         if self.messages and self.messages[-1].get("role") == "tool":
             self._append({"role": "assistant", "content": "(previous turn ended before a final answer)"})
-        self._append({"role": "user", "content": content})
+        from hubble.images import user_content
+        self._append({"role": "user", "content": user_content(content, images)})
 
     def context_ratio(self) -> float:
         window = int(self.settings.get("context_window", 128000)) or 1
@@ -204,7 +211,8 @@ class Agent:
 
     # ----- main loop -----------------------------------------------------
 
-    def run(self, prompt: str) -> str:
+    def run(self, prompt: str, images: Optional[List[str]] = None) -> str:
+        """images: data: URLs to send with the prompt (the model must support vision)."""
         stats = RunStats()
         self.last_stats = stats
         if not self.is_subagent:
@@ -217,7 +225,8 @@ class Agent:
         if hook.additional_context:
             prompt = f"{prompt}\n\n<hook-context>\n{hook.additional_context}\n</hook-context>"
         self.ctx.begin_turn()
-        self.add_user_message(prompt)
+        self.add_user_message(prompt, images)
+        user_msg = self.messages[-1]
         try:
             return self._loop(stats)
         except KeyboardInterrupt:
@@ -233,7 +242,7 @@ class Agent:
             self.events.turn_end(TurnResult())
             if self._partial_text:
                 self._append({"role": "assistant", "content": self._partial_text + "\n[response cut off by an API error]"})
-            if self.messages and self.messages[-1] == {"role": "user", "content": prompt}:
+            if self.messages and self.messages[-1] is user_msg:
                 # Nothing happened yet; drop the prompt so a retry does not send it twice.
                 self.messages.pop()
                 if self.session:
@@ -487,7 +496,8 @@ class Agent:
             if role == "tool":
                 lines.append(f"[tool result {m.get('name', '')}]\n{truncate(m.get('content') or '', 1500)}")
             else:
-                text = m.get("content") or ""
+                from hubble.images import content_text
+                text = content_text(m.get("content") or "")
                 for tc in m.get("tool_calls") or []:
                     text += f"\n[calls {tc['function']['name']}({truncate(tc['function']['arguments'], 400)})]"
                 lines.append(f"[{role}]\n{text}")

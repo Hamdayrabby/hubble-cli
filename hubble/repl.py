@@ -20,6 +20,7 @@ from rich.table import Table
 
 from hubble import __version__
 from hubble.agent import Agent
+from hubble.images import ImageError, content_text, data_url, grab_clipboard_image, is_image
 from hubble.models import resolve_model
 from hubble.provider import OpenAICompatProvider
 from hubble.providers import (DEFAULT_PROVIDER, ProviderConfig, normalize_provider_name, provider_models,
@@ -93,6 +94,7 @@ class Repl:
         self._scan_key = None           # last seen scanner progress, so redraws only rebuild on change
         self._home_info_cache = None
         self._home = None               # home screen (status, tips) while the first prompt is showing
+        self._pending_images: List[Path] = []  # pasted from the clipboard, sent with the next message
         self.turn_stats = None
         self.agent = agent
         agent.fallback_resolver = self.fallback_for
@@ -202,6 +204,15 @@ class Repl:
         @kb.add("escape", "enter")
         def _(event):
             event.current_buffer.insert_text("\n")
+
+        @kb.add("escape", "v")  # Alt+V; terminals keep Ctrl+V for their own text paste
+        def _(event):
+            placeholder = self.paste_image()
+            if placeholder:
+                event.current_buffer.insert_text(placeholder + " ")
+            else:
+                from prompt_toolkit.application import run_in_terminal
+                run_in_terminal(lambda: console.print("[dim]No image on the clipboard.[/dim]"))
 
         @kb.add("c-j")
         def _(event):
@@ -466,12 +477,36 @@ class Repl:
         return None
 
     def send(self, text: str):
-        prompt = self.expand_mentions(text)
-        self.agent.run(prompt)
+        images: List[str] = []
+        prompt = self.expand_mentions(text, images)
+        prompt = self._attach_pasted_images(prompt, images)
+        self.agent.run(prompt, images or None)
         if self.agent.last_stats.model_calls:
             self.turn_stats = self.agent.last_stats  # shown in the bar under the input box
 
-    def expand_mentions(self, text: str) -> str:
+    def paste_image(self) -> Optional[str]:
+        """Grab an image from the clipboard; returns its [Image #N] placeholder, or None."""
+        path = grab_clipboard_image()
+        if path is None:
+            return None
+        self._pending_images.append(path)
+        return f"[Image #{len(self._pending_images)}]"
+
+    def _attach_pasted_images(self, prompt: str, images: List[str]) -> str:
+        for i, path in enumerate(self._pending_images, 1):
+            if f"[Image #{i}]" not in prompt:
+                continue  # the placeholder was deleted before sending: drop that image
+            try:
+                images.append(data_url(path))
+                console.print(f"[dim]  attached pasted image #{i}[/dim]")
+            except (ImageError, OSError) as e:
+                console.print(f"[yellow]Skipped image #{i}: {escape(str(e))}[/yellow]")
+        for path in self._pending_images:
+            path.unlink(missing_ok=True)
+        self._pending_images = []
+        return prompt
+
+    def expand_mentions(self, text: str, images: Optional[List[str]] = None) -> str:
         attachments = []
         for m in MENTION_RX.finditer(text):
             raw = m.group(1).rstrip(".,:;")
@@ -481,6 +516,13 @@ class Repl:
                 continue
             if is_secret_path(p) and not self.agent.ctx.allow_secrets:
                 console.print(f"[yellow]Skipped @{escape(raw)}: looks like a secrets file.[/yellow]")
+                continue
+            if p.is_file() and is_image(p) and images is not None:
+                try:
+                    images.append(data_url(p))
+                    console.print(f"[dim]  attached image {escape(self.agent.ctx.rel(p))}[/dim]")
+                except (ImageError, OSError) as e:
+                    console.print(f"[yellow]Skipped @{escape(raw)}: {escape(str(e))}[/yellow]")
                 continue
             if p.is_file():
                 try:
@@ -525,7 +567,8 @@ class Repl:
             table.add_row(f"[bold]/{cmd.name}[/bold] [dim]{escape(cmd.args)}[/dim]", escape(cmd.help) + alias)
         console.print(table)
         console.print("\n[bold]Input[/bold]\n"
-                      "  @path          attach a file or directory listing to your message\n"
+                      "  @path          attach a file or directory listing (or an image) to your message\n"
+                      "  Alt+V          paste an image from the clipboard (needs a vision model)\n"
                       "  !command       run a shell command yourself (not sent to the model)\n"
                       "  #note          append a note to ./HUBBLE.md (project memory)\n"
                       "  Esc+Enter      new line (also Ctrl+J)\n"
@@ -1114,7 +1157,7 @@ class Repl:
             if role == "tool":
                 lines += [f"### Tool result ({m.get('name', '')})", "```", truncate(m.get("content") or "", 3000), "```", ""]
                 continue
-            lines += [f"### {role.capitalize()}", m.get("content") or "", ""]
+            lines += [f"### {role.capitalize()}", content_text(m.get("content") or ""), ""]
             for tc in m.get("tool_calls") or []:
                 lines += [f"- tool call `{tc['function']['name']}` `{truncate(tc['function']['arguments'], 500)}`"]
         path.write_text("\n".join(lines), encoding="utf-8")
@@ -1143,6 +1186,6 @@ def print_history_tail(messages, n: int = 4):
     shown = [m for m in messages if m.get("role") in ("user", "assistant") and m.get("content")][-n:]
     for m in shown:
         who = "[bold cyan]you[/bold cyan]" if m["role"] == "user" else "[bold magenta]hubble[/bold magenta]"
-        text = m["content"].strip().splitlines()
+        text = content_text(m["content"]).strip().splitlines()
         preview = " ".join(text)[:200] if text else ""
         console.print(f"  {who} [dim]{escape(preview)}[/dim]")

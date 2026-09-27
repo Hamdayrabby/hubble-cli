@@ -65,8 +65,9 @@ class SessionStore:
         out = []
         for p in files[:limit]:
             messages, meta = self._replay(p)
-            first = next((m.get("content") for m in messages
-                          if m.get("role") == "user" and isinstance(m.get("content"), str)), "")
+            from hubble.images import content_text
+            first = next((content_text(m.get("content")) for m in messages
+                          if m.get("role") == "user" and m.get("content")), "")
             if not messages:
                 continue
             out.append({"id": p.stem, "updated": p.stat().st_mtime, "model": meta.get("model"),
