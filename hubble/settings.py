@@ -30,7 +30,10 @@ DEFAULTS: Dict[str, Any] = {
     "shell": "auto",
     "shell_timeout": 120,
     "additional_dirs": [],
-    "shell_sandbox": "off",  # "docker" runs shell commands in an isolated, resource-capped container
+    # "auto": OS sandbox (macOS Seatbelt / Linux bubblewrap) where available, else off. Commands
+    # can read anything but only write in the workspace and temp dirs. "native" | "docker" | "off".
+    "shell_sandbox": "auto",
+    "sandbox_writable": [],  # extra dirs the native sandbox may write to (e.g. "~/.cache/pip")
     "sandbox_image": "python:3.12-slim",
     "sandbox_memory": "1g",
     "sandbox_cpus": "2",
@@ -102,7 +105,7 @@ def _merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
 # A cloned repository must not be able to loosen security or redirect the API key.
 NEVER_FROM_PROJECT = {"base_url", "api_key"}
 TRUSTED_ONLY = {"permission_mode", "allow_secret_files", "additional_dirs", "shell",
-                "shell_sandbox", "sandbox_network", "hooks", "mcp_servers"}
+                "shell_sandbox", "sandbox_network", "sandbox_writable", "hooks", "mcp_servers"}
 TRUST_FILE = HOME_DIR / "trusted_folders.json"
 
 

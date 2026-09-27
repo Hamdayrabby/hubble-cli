@@ -153,11 +153,19 @@ class Agent:
     def system_prompt(self) -> str:
         if self.system_override:
             return self.system_override
-        if self.ctx.sandbox == "docker":
+        from hubble.sandbox import effective_mode
+        mode = effective_mode(self.ctx.sandbox)
+        if mode == "docker":
             shell_label = (f"an isolated Docker container (image {self.ctx.sandbox_image}), reached via "
                           f"`sh -lc`; use POSIX/Linux syntax regardless of the host OS. Only /workspace "
                           f"(this project) is visible inside it"
                           + ("" if self.ctx.sandbox_network else "; it has no network access"))
+        elif mode == "native":
+            shell_label = (f"{shell_name(self.ctx.shell_argv)}, inside a sandbox: commands can read anything "
+                           "but write only inside the workspace and temp dirs"
+                           + ("" if self.ctx.sandbox_network else ", with no network access")
+                           + ". If a command must write elsewhere (global installs, ~/ config), set "
+                           "unsandboxed: true on that one shell call; the user will be asked")
         else:
             shell_label = shell_name(self.ctx.shell_argv)
         prompt = build_system_prompt(self.ctx.root, self.persona, shell_label, self.model,
@@ -443,6 +451,11 @@ class Agent:
             except ToolError:
                 pass
         decision, reason = self.permissions.check(tool.name, tool.kind, target)
+        if (decision == "allow" and tool.name == "shell" and args.get("unsandboxed")
+                and self.permissions.mode != "yolo"):
+            from hubble.sandbox import effective_mode
+            if effective_mode(self.ctx.sandbox) != "off":
+                decision = "ask"  # leaving the sandbox always needs a human, whatever allow rules say
         if decision == "deny":
             output = f"Permission denied: {reason}."
             self.events.tool_result(tool, args, output, True)
@@ -639,7 +652,7 @@ class TaskTool(Tool):
                               shell_argv=ctx.shell_argv, shell_timeout=ctx.shell_timeout,
                               sandbox=ctx.sandbox, sandbox_image=ctx.sandbox_image,
                               sandbox_memory=ctx.sandbox_memory, sandbox_cpus=ctx.sandbox_cpus,
-                              sandbox_network=ctx.sandbox_network)
+                              sandbox_network=ctx.sandbox_network, sandbox_writable=ctx.sandbox_writable)
         if edit:
             # Full toolset except task/write_skill: an edit sub-agent does its own assigned job,
             # it does not spawn further sub-agents or rewrite the project's skills.

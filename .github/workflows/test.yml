@@ -19,8 +19,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Install bubblewrap (native sandbox tests)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y bubblewrap || true
       - run: pip install -e ".[dev]"
-      - run: pytest -q
+      - run: pytest -q -rs
 
   build:
     runs-on: ubuntu-latest

@@ -73,11 +73,12 @@ class ToolContext:
     allow_secrets: bool = False
     shell_argv: List[str] = field(default_factory=lambda: detect_shell())
     shell_timeout: int = 120
-    sandbox: str = "off"  # "off" | "docker": run shell commands in an isolated container
+    sandbox: str = "off"  # "off" | "auto" | "native" | "docker" (see sandbox.py)
     sandbox_image: str = "python:3.12-slim"
     sandbox_memory: str = "1g"
     sandbox_cpus: str = "2"
     sandbox_network: bool = True
+    sandbox_writable: List[Path] = field(default_factory=list)  # extra writable dirs for the native sandbox
     read_mtimes: Dict[str, float] = field(default_factory=dict)
     todos: List[Dict[str, str]] = field(default_factory=list)
     # One dict per agent turn: absolute path -> original bytes (None if the file did not exist).
@@ -407,23 +408,41 @@ class Shell(Tool):
         "command": {"type": "string", "description": "Command to run"},
         "timeout": {"type": "integer", "description": "Timeout in seconds (default 120, max 600)"},
         "description": {"type": "string", "description": "5-10 word summary of what the command does"},
+        "unsandboxed": {"type": "boolean",
+                        "description": "Run outside the command sandbox (the user is asked first). Only when the "
+                                       "command must write outside the workspace, or failed because the sandbox "
+                                       "blocked it."},
     }, "required": ["command"]}
     kind = "exec"
 
     def preview(self, args, ctx):
-        return args.get("command", "")
+        from hubble.sandbox import effective_mode
+        cmd = args.get("command", "")
+        if args.get("unsandboxed") and effective_mode(ctx.sandbox) != "off":
+            return f"{cmd}\n(outside the sandbox: full access to this machine)"
+        return cmd
 
     def run(self, args, ctx):
+        from hubble.sandbox import effective_mode
         cmd = args["command"]
         timeout = max(1, min(int(args.get("timeout") or ctx.shell_timeout), 600))
-        if ctx.sandbox == "docker":
+        mode = "off" if args.get("unsandboxed") else effective_mode(ctx.sandbox)
+        if mode == "docker":
             return self._run_docker(cmd, timeout, ctx)
-        return self._run_host(cmd, timeout, ctx)
+        return self._run_host(cmd, timeout, ctx, native=mode == "native")
 
-    def _run_host(self, cmd: str, timeout: int, ctx: ToolContext) -> str:
+    def _run_host(self, cmd: str, timeout: int, ctx: ToolContext, native: bool = False) -> str:
         argv = list(ctx.shell_argv)
         if "powershell" in argv[0].lower() or "pwsh" in argv[0].lower():
             cmd = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; " + cmd
+        if native:
+            from hubble.sandbox import SandboxUnavailable, wrap
+            try:
+                full = wrap(argv, cmd, ctx.root, [*ctx.extra_dirs, *ctx.sandbox_writable], ctx.sandbox_network)
+            except SandboxUnavailable as e:
+                raise ToolError(f"shell_sandbox is 'native' but no sandbox is available: {e}. "
+                                "Set shell_sandbox to \"auto\" or \"off\".")
+            argv, cmd = full[:-1], full[-1]
         env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
         # Own process group, so timeouts and Ctrl+C kill the whole tree. Otherwise grandchildren
         # (dev servers, watchers) keep the pipes open and the CLI hangs.
@@ -446,7 +465,15 @@ class Shell(Tool):
             _kill_tree(proc)
             _drain(proc)
             raise
-        return _format_result(stdout, stderr, proc.returncode)
+        result = _format_result(stdout, stderr, proc.returncode)
+        if native and proc.returncode != 0:
+            from hubble.sandbox import looks_blocked
+            if looks_blocked(stderr or stdout or ""):
+                result += ("\n\n[sandbox] This command ran in a sandbox that only allows writes inside the workspace"
+                           + ("" if ctx.sandbox_network else " and blocks network access")
+                           + ". If it failed because of that, retry it with unsandboxed: true (the user will be "
+                           "asked).")
+        return result
 
     def _run_docker(self, cmd: str, timeout: int, ctx: ToolContext) -> str:
         docker = shutil.which("docker")

@@ -150,8 +150,8 @@ class Repl:
         r("fallback", self.cmd_fallback, "Choose the model used when the current one is rate limited",
           args="[model|auto|off]")
         r("thinking", self.cmd_thinking, "Show or hide the model's reasoning text", args="[on|off]")
-        r("sandbox", self.cmd_sandbox, "Run shell commands in an isolated Docker container instead of "
-          "directly on this machine", args="[on|off]")
+        r("sandbox", self.cmd_sandbox, "Sandbox shell commands: OS sandbox (macOS/Linux), Docker, or off",
+          args="[auto|native|docker|off]")
         r("mcp", self.cmd_mcp, "List MCP servers; log in to or out of a remote one", args="[login|logout <server>]")
         r("hooks", self.cmd_hooks, "List configured hooks")
         r("config", self.cmd_config, "Show effective settings and allow/deny rules")
@@ -1140,27 +1140,39 @@ class Repl:
         console.print(f"[green]Reasoning text {state}.[/green]")
 
     def cmd_sandbox(self, arg):
+        from hubble.sandbox import effective_mode, native_kind, why_unavailable
         ctx = self.agent.ctx
         arg = arg.lower().strip()
-        if arg in ("on", "docker"):
+        if arg == "docker":
             if not shutil.which("docker"):
                 console.print("[red]docker was not found on PATH. Install Docker Desktop first.[/red]")
                 return
             ctx.sandbox = "docker"
-        elif arg == "off":
-            ctx.sandbox = "off"
+        elif arg in ("on", "native"):
+            if not native_kind():
+                console.print(f"[red]No OS sandbox on this machine: {escape(why_unavailable())}.[/red]")
+                return
+            ctx.sandbox = "native"
+        elif arg in ("auto", "off"):
+            ctx.sandbox = arg
         elif arg:
-            console.print("Usage: /sandbox [on|off]")
+            console.print("Usage: /sandbox [auto|native|docker|off]")
             return
         if arg:
             self.agent.settings["shell_sandbox"] = ctx.sandbox
             save_user_setting("shell_sandbox", ctx.sandbox)
-        if ctx.sandbox == "docker":
-            net = "with network access" if ctx.sandbox_network else "network disabled"
+        mode = effective_mode(ctx.sandbox)
+        net = "with network access" if ctx.sandbox_network else "network disabled"
+        if mode == "docker":
             console.print(f"[green]Sandbox: docker[/green] [dim](image {ctx.sandbox_image}, "
                           f"{ctx.sandbox_memory} mem, {ctx.sandbox_cpus} cpu, {net})[/dim]")
+        elif mode == "native":
+            console.print(f"[green]Sandbox: {native_kind()}[/green] [dim](writes only inside the workspace and "
+                          f"temp dirs, {net}; setting: {ctx.sandbox})[/dim]")
         else:
-            console.print("[yellow]Sandbox: off[/yellow] [dim](shell commands run directly on this machine)[/dim]")
+            hint = f" — {why_unavailable()}" if ctx.sandbox == "auto" else ""
+            console.print(f"[yellow]Sandbox: off[/yellow] [dim](shell commands run directly on this machine"
+                          f"{escape(hint)})[/dim]")
 
     def cmd_mcp(self, arg):
         from hubble import mcp
