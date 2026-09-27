@@ -6,9 +6,12 @@ drives the interactive REPL, headless `-p` mode and read-only sub-agents.
 
 import itertools
 import json
+import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from hubble.hooks import HookRunner
@@ -592,6 +595,9 @@ class TaskTool(Tool):
             "capability": {"type": "string", "enum": ["read_only", "edit"],
                            "description": "read_only (default) or edit"},
             "model": {"type": "string", "description": "Model for this sub-agent (default: same as you)"},
+            "isolation": {"type": "string", "enum": ["none", "worktree"],
+                          "description": "edit only. worktree: work in a fresh git worktree on its own branch, "
+                                         "so the main checkout is untouched until you review and merge"},
         }
         defs = self._defs()
         if defs:
@@ -619,7 +625,17 @@ class TaskTool(Tool):
             if spec is None:
                 raise ToolError(f"no agent named '{args['agent']}'. Available: {', '.join(self._defs()) or '(none)'}")
         edit = (spec.capability if spec else args.get("capability")) == "edit"
-        sub_ctx = ToolContext(root=ctx.root, extra_dirs=ctx.extra_dirs, allow_secrets=ctx.allow_secrets,
+        isolated = None
+        work_root = ctx.root
+        if edit and args.get("isolation") == "worktree":
+            from hubble import worktree
+            slug = re.sub(r"[^a-z0-9]+", "-", (args.get("description") or "task").lower()).strip("-")[:30] or "task"
+            try:
+                isolated = worktree.create(ctx.root, f"task-{int(time.time()) % 100000}-{slug}")
+            except worktree.WorktreeError as e:
+                raise ToolError(f"could not create an isolated worktree: {e}")
+            work_root = Path(isolated["path"])
+        sub_ctx = ToolContext(root=work_root, extra_dirs=ctx.extra_dirs, allow_secrets=ctx.allow_secrets,
                               shell_argv=ctx.shell_argv, shell_timeout=ctx.shell_timeout,
                               sandbox=ctx.sandbox, sandbox_image=ctx.sandbox_image,
                               sandbox_memory=ctx.sandbox_memory, sandbox_cpus=ctx.sandbox_cpus,
@@ -630,8 +646,12 @@ class TaskTool(Tool):
             tools = [t for t in default_tools() + web_tools(p.settings)
                     if t.name not in ("task", "write_skill")]
             perms = p.permissions  # same mode and rules as the parent: edits/commands ask the same way
+            if isolated and perms.mode == "default":
+                # File edits land in a throwaway checkout, so they need no approval; shell commands
+                # still ask, since they can reach outside it.
+                perms = Permissions("accept-edits", allow=perms.allow, deny=perms.deny)
             system = ("You are an implementation sub-agent inside Hubble, working on one well-scoped task "
-                      f"delegated to you in the workspace at {ctx.root}. You have read_file, write_file, "
+                      f"delegated to you in the workspace at {work_root}. You have read_file, write_file, "
                       "edit_file, shell, grep, glob, list_dir and todo_write. You cannot ask the user "
                       "anything -- if the task is ambiguous, make the most reasonable choice and say what "
                       "you assumed in your final report. Verify your change (run tests/a build) before "
@@ -680,6 +700,23 @@ class TaskTool(Tool):
             status = "done"
             detail = f"report ready ({len(report or ''):,} chars)" if report else "no report"
             report = report or "(sub-agent returned no report)"
+            if isolated:
+                from hubble import worktree
+                rel = ctx.rel(work_root)
+                branch = isolated["branch"]
+                sha = worktree.commit_all(work_root, f"hubble task: {label}")
+                if sha:
+                    stat = worktree._git(work_root, "show", "--stat", "--format=", "HEAD", check=False)
+                    report += (f"\n\n<worktree path=\"{rel}\" branch=\"{branch}\" commit=\"{sha}\">\n{stat}\n</worktree>\n"
+                               f"These changes are committed on branch {branch} only; the main checkout is "
+                               f"untouched. Review with `git show {sha}`; if they are right, bring them in with "
+                               f"`git cherry-pick {sha}` (or `git merge {branch}`), or tell the user they can.")
+                else:
+                    st = worktree.status(work_root)
+                    report += (f"\n\n<worktree path=\"{rel}\" branch=\"{branch}\">\n"
+                               f"{st['dirty'] or 'no changes'}\n</worktree>\n"
+                               + ("The changes are uncommitted and only in that worktree." if st["dirty"] else
+                                  "The sub-agent made no file changes."))
             stop = p.hooks.run("SubagentStop", {"description": label, "capability": "edit" if edit else "read_only",
                                                 "agent": args.get("agent"), "report": report}, name=label)
             if stop.additional_context:

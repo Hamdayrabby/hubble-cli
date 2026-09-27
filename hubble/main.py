@@ -42,6 +42,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="with -p: attach an image to the prompt (repeatable; needs a vision model)")
     p.add_argument("--max-turns", type=int, help="max model calls per prompt")
     p.add_argument("--cwd", help="workspace root (default: current directory)")
+    p.add_argument("-w", "--worktree", metavar="NAME",
+                   help="work in an isolated git worktree (.hubble/worktrees/NAME, branch hubble/NAME); "
+                        "created if missing")
     p.add_argument("--base-url", help="API base URL")
     p.add_argument("--api-key", help="API key (default: HUBBLE_API_KEY / .env)")
     p.add_argument("--allow", action="append", default=[], metavar="RULE", help='allow rule, e.g. "shell(pytest*)"')
@@ -64,6 +67,18 @@ def main(argv=None):
     root = Path(args.cwd or ".").resolve()
     if not root.is_dir():
         sys.exit(f"hubble: workspace not found: {root}")
+    if args.worktree:
+        from hubble import worktree
+        try:
+            existing = next((w for w in worktree.list_worktrees(root) if w["name"] == args.worktree), None)
+            if existing:
+                root = Path(existing["path"])
+            else:
+                info = worktree.create(root, args.worktree)
+                root = Path(info["path"])
+                print(f"hubble: created worktree {info['path']} on branch {info['branch']}", file=sys.stderr)
+        except worktree.WorktreeError as e:
+            sys.exit(f"hubble: {e}")
 
     overrides = {
         "model": args.model, "base_url": args.base_url, "api_key": args.api_key,

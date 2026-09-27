@@ -95,6 +95,7 @@ class Repl:
         self._home_info_cache = None
         self._home = None               # home screen (status, tips) while the first prompt is showing
         self._pending_images: List[Path] = []  # pasted from the clipboard, sent with the next message
+        self._main_root: Optional[Path] = None  # set once /worktree moves the tools elsewhere
         self.turn_stats = None
         self.agent = agent
         agent.fallback_resolver = self.fallback_for
@@ -157,6 +158,8 @@ class Repl:
         r("export", self.cmd_export, "Export conversation to markdown", ("copy",), "[file]")
         r("skills", self.cmd_skills, "List skills (the model can also call these on its own)")
         r("skill", self.cmd_skill_new, "Create a new skill template to fill in", args="new <name> [user]")
+        r("worktree", self.cmd_worktree, "Work in an isolated git worktree (new, switch, exit, remove, list)",
+          ("worktrees", "wt"), "[new|switch|exit|remove <name>]")
         r("agents", self.cmd_agents, "List custom sub-agents, or create one", ("agent",), "[new <name> [user]]")
         r("plugin", self.cmd_plugin, "List, install, remove, enable or disable plugins", ("plugins",),
           "[list|install <src>|remove <name>]")
@@ -928,6 +931,69 @@ class Repl:
         for s in self.agent.skills:
             console.print(f"  [bold]/{s.name}[/bold] [dim]({s.scope})[/dim]  {escape(s.description)}")
         console.print("[dim]Run one with /<name>, or the model calls them on its own when relevant.[/dim]")
+
+    def cmd_worktree(self, arg):
+        from hubble import worktree
+        parts = arg.split()
+        sub = parts[0] if parts else "list"
+        ctx = self.agent.ctx
+        try:
+            if sub in ("new", "create", "switch", "enter") and len(parts) >= 2:
+                name = parts[1]
+                existing = next((w for w in worktree.list_worktrees(ctx.root) if w["name"] == name), None)
+                if existing is None:
+                    if sub in ("switch", "enter"):
+                        console.print(f"[yellow]No worktree named {escape(name)}. /worktree new {escape(name)}[/yellow]")
+                        return
+                    info = worktree.create(ctx.root, name)
+                    console.print(f"[green]Created worktree {escape(info['path'])}[/green] [dim](branch "
+                                  f"{escape(info['branch'])} from {escape(info['base'])})[/dim]")
+                    path = Path(info["path"])
+                else:
+                    path = Path(existing["path"])
+                self._switch_root(path)
+            elif sub in ("exit", "leave", "main"):
+                if not self._main_root or ctx.root == self._main_root:
+                    console.print("[dim]Already in the main checkout.[/dim]")
+                    return
+                self._switch_root(self._main_root)
+            elif sub in ("remove", "rm", "delete") and len(parts) >= 2:
+                if ctx.root.name == parts[1] and self._main_root:
+                    self._switch_root(self._main_root)
+                gone = worktree.remove(ctx.root, parts[1], force="--force" in parts,
+                                       delete_branch="--delete-branch" in parts)
+                console.print(f"[green]Removed worktree {escape(gone)}.[/green]")
+            elif sub == "list":
+                items = worktree.list_worktrees(ctx.root)
+                if not items:
+                    console.print("[dim]Not a git repository.[/dim]")
+                    return
+                for i, w in enumerate(items):
+                    here = " [bold green]●[/bold green]" if Path(w["path"]) == ctx.root else "  "
+                    label = w["name"] if w["hubble"] else ("(main)" if i == 0 else Path(w["path"]).name)
+                    console.print(f"{here} [bold]{escape(label)}[/bold] [dim]{escape(w['branch'])} "
+                                  f"{escape(w['head'])}  {escape(w['path'])}[/dim]")
+                console.print("[dim]/worktree new <name> · switch <name> · exit · remove <name> [--force] "
+                              "[--delete-branch][/dim]")
+            else:
+                console.print("Usage: /worktree [list | new <name> | switch <name> | exit | remove <name>]")
+        except worktree.WorktreeError as e:
+            console.print(f"[red]{escape(str(e))}[/red]")
+
+    def _switch_root(self, path: Path):
+        """Point every tool at another checkout. History stays; the system prompt shows the new root."""
+        ctx = self.agent.ctx
+        if self._main_root is None:
+            self._main_root = ctx.root
+        ctx.root = path.resolve()
+        ctx.read_mtimes.clear()
+        self.agent.reload_memory()
+        self.agent.reload_skills()
+        self.agent.reload_agents()
+        from hubble import worktree
+        branch = worktree.current_branch(ctx.root)
+        console.print(f"[green]Working in {escape(str(ctx.root))}[/green] [dim](branch {escape(branch)}). "
+                      "/worktree exit returns to the main checkout.[/dim]")
 
     def cmd_agents(self, arg):
         from hubble.subagents import TEMPLATE as AGENT_TEMPLATE
