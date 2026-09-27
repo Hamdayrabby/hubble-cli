@@ -2,8 +2,9 @@
 
 The built-in "hubble" provider comes from settings/.env, and connects to the AIHub gateway (or
 another OpenAI-compatible base URL you set) by default. Extra providers added with
-`/provider add` live in ~/.hubble/providers.json (API keys are stored there in plain text,
-like a .env file). Each provider has its own model scan file.
+`/provider add` live in ~/.hubble/providers.json; their API keys go to the OS credential store
+(see keystore.py), or into that file in plain text only where no store exists. Each provider
+has its own model scan file.
 """
 
 import json
@@ -14,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
+from hubble import keystore
 from hubble.models import SCAN_FILE, all_models
 from hubble.provider import normalize_base_url
 from hubble.settings import HOME_DIR
@@ -64,21 +66,45 @@ def load_providers(settings: Dict[str, Any]) -> Dict[str, ProviderConfig]:
                                                settings["api_key"], True)
     for name, entry in _read_file().items():
         if isinstance(entry, dict) and entry.get("base_url") and entry.get("api_key"):
-            out[name] = ProviderConfig(name, normalize_base_url(entry["base_url"]), entry["api_key"],
+            key = keystore.resolve(entry["api_key"])
+            if not key:
+                continue  # key lives in a credential store that is not reachable here
+            out[name] = ProviderConfig(name, normalize_base_url(entry["base_url"]), key,
                                        bool(entry.get("check_models", True)))
     return out
 
 
 def save_provider(cfg: ProviderConfig):
+    """The key goes to the OS credential store when there is one; plain text only as a fallback."""
     data = _read_file()
-    data[cfg.name] = {"base_url": cfg.base_url, "api_key": cfg.api_key, "check_models": cfg.check_models}
+    stored = keystore.store(cfg.name, cfg.api_key) or cfg.api_key
+    data[cfg.name] = {"base_url": cfg.base_url, "api_key": stored, "check_models": cfg.check_models}
     _write_file(data)
+
+
+def secure_existing_keys() -> Tuple[int, int]:
+    """Move plain-text keys in providers.json into the credential store. Returns (moved, left)."""
+    data = _read_file()
+    moved = left = 0
+    for name, entry in data.items():
+        if not isinstance(entry, dict) or not entry.get("api_key") or keystore.is_ref(entry["api_key"]):
+            continue
+        ref = keystore.store(name, entry["api_key"])
+        if ref:
+            entry["api_key"] = ref
+            moved += 1
+        else:
+            left += 1
+    if moved:
+        _write_file(data)
+    return moved, left
 
 
 def remove_provider(name: str) -> bool:
     data = _read_file()
     if name not in data:
         return False
+    keystore.delete((data[name] or {}).get("api_key", ""))
     del data[name]
     _write_file(data)
     path = scan_file(name)

@@ -126,7 +126,7 @@ class Repl:
         r("models", self.cmd_models, "List models; '/models refresh' re-checks which are available",
           args="[filter|refresh]")
         r("provider", self.cmd_provider, "Switch provider, or add/remove one (base URL + API key)",
-          ("providers",), "[add|remove <name>|list]")
+          ("providers",), "[add|remove <name>|list|secure]")
         r("mode", self.cmd_mode, "Permission mode: default, accept-edits, plan, yolo (Shift+Tab cycles)",
           ("permissions",), "[mode]")
         r("persona", self.cmd_persona, f"System persona: {', '.join(PERSONAS)}", args="[name]")
@@ -696,6 +696,18 @@ class Repl:
             return self.add_provider()
         if sub in ("remove", "rm", "delete"):
             return self.remove_provider(rest.strip())
+        if sub == "secure":
+            from hubble import keystore
+            from hubble.providers import secure_existing_keys
+            if not keystore.available():
+                console.print("[yellow]No OS credential store available here (e.g. headless Linux); keys stay "
+                              "in ~/.hubble/providers.json. Keep that file private.[/yellow]")
+                return
+            moved, left = secure_existing_keys()
+            console.print(f"[green]Moved {moved} API key(s) into the OS credential store.[/green]"
+                          + (f" [yellow]{left} could not be moved.[/yellow]" if left else "")
+                          + " [dim]The built-in provider's key comes from .env / HUBBLE_API_KEY and is not moved.[/dim]")
+            return
         if sub == "list" or not sys.stdin.isatty():
             for n, cfg in self.providers.items():
                 mark = "[bold green]●[/bold green]" if n == self.agent.provider_name else " "
