@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:  # so publish.yml can re-run this same matrix against a tagged commit
 
 jobs:
   test:

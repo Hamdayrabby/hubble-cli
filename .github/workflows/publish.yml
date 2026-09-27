@@ -1,0 +1,48 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - "v*.*.*"   # e.g. v4.0.1
+  workflow_dispatch:  # allow a manual run from the Actions tab too
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build
+      - name: Verify the tag matches hubble.__version__
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CODE_VERSION=$(python -c "import hubble; print(hubble.__version__)")
+          if [ "$TAG" != "$CODE_VERSION" ]; then
+            echo "Tag v$TAG does not match hubble/__init__.py's __version__ ($CODE_VERSION)."
+            echo "Bump __version__ and push a matching tag."
+            exit 1
+          fi
+      - run: python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  test:
+    # Re-run the full matrix against the tagged commit before publishing anything.
+    uses: ./.github/workflows/test.yml
+
+  publish:
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # required for PyPI Trusted Publishing (OIDC) -- no API token needed/stored
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

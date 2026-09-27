@@ -27,3 +27,4 @@ dist/
 .idea/
 .vscode/
 Thumbs.db
+hubble_cli-*/
