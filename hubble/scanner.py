@@ -39,10 +39,20 @@ def _context_length(entry: Dict[str, Any]) -> Optional[int]:
     return None
 
 
+# Statuses that say "try again later", not "this model doesn't work": rate limits, overload,
+# gateway hiccups. A model that fails with one of these is unknown, never unavailable.
+TRANSIENT_STATUS = {408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 524, 529}
+# Worth another try, but a verdict if it keeps happening: gateways that rotate upstream keys
+# return a spurious 401 now and then for a model that works on the next request.
+RETRY_STATUS = TRANSIENT_STATUS | {401}
+
+
 def _probe(client: httpx.Client, base_url: str, headers: Dict[str, str], model: str, timeout: float) -> Dict[str, Any]:
-    payload = {"model": model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 10, "temperature": 0.1}
+    # 32 tokens, not 10: reasoning models spend a small budget thinking and return empty content.
+    payload = {"model": model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 32, "temperature": 0.1}
     start = time.time()
-    result = {"model": model, "available": False, "status_code": None, "latency_ms": 0, "sample": "", "reason": ""}
+    result = {"model": model, "available": False, "transient": False, "status_code": None, "latency_ms": 0,
+              "sample": "", "reason": ""}
     try:
         resp = client.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=timeout)
         result["latency_ms"] = round((time.time() - start) * 1000)
@@ -50,31 +60,51 @@ def _probe(client: httpx.Client, base_url: str, headers: Dict[str, str], model: 
         text = resp.text
         if resp.status_code != 200:
             result["reason"] = f"HTTP {resp.status_code}"
+            result["transient"] = resp.status_code in RETRY_STATUS
         elif "upstream returned 403" in text or '"upstream_error"' in text or "unhandled err" in text:
             result["reason"] = "upstream error inside 200"
         else:
             choices = resp.json().get("choices") or []
-            content = ((choices[0].get("message") or {}).get("content") or "").strip() if choices else ""
+            msg = (choices[0].get("message") or {}) if choices else {}
+            content = (msg.get("content") or "").strip()
+            reasoning = (msg.get("reasoning_content") or msg.get("reasoning") or "").strip()
+            finish = choices[0].get("finish_reason") if choices else None
             if content:
                 result.update(available=True, reason="OK", sample=content.replace("\n", " ")[:60])
+            elif reasoning or finish == "length":
+                # It answered -- it just spent the budget thinking. That model works.
+                result.update(available=True, reason="OK (reasoning only)", sample=reasoning.replace("\n", " ")[:60])
             else:
                 result["reason"] = "empty content"
+    except (httpx.TimeoutException, httpx.TransportError) as e:
+        result["latency_ms"] = round((time.time() - start) * 1000)
+        result["reason"] = f"{type(e).__name__}"
+        result["transient"] = True
     except (httpx.HTTPError, ValueError) as e:
         result["latency_ms"] = round((time.time() - start) * 1000)
         result["reason"] = f"{type(e).__name__}"
     return result
 
 
+def _previously_working(path: Path) -> Dict[str, Dict[str, Any]]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return {m["model"]: m for m in data.get("working_models", []) if m.get("model")}
+    except (OSError, ValueError):
+        return {}
+
+
 class ModelScanner:
     """Runs one scan at a time in a daemon thread; `status` is safe to read from the UI."""
 
-    def __init__(self, base_url: str, api_key: str, concurrency: int = 12, timeout: float = 12.0,
-                 output: Path = SCAN_FILE):
+    def __init__(self, base_url: str, api_key: str, concurrency: int = 6, timeout: float = 25.0,
+                 output: Path = SCAN_FILE, retry_delays=(2.0, 6.0)):
         self.base_url = normalize_base_url(base_url)
         self.api_key = api_key
         self.concurrency = concurrency
         self.timeout = timeout
         self.output = output
+        self.retry_delays = retry_delays
         self.status = "idle"      # idle | running | done | failed
         self.done = 0
         self.total = 0
@@ -128,11 +158,39 @@ class ModelScanner:
 
                 with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
                     results = list(pool.map(task, owners))
+
+                # Rate limits/timeouts in a burst of parallel probes are often self-inflicted (many
+                # models share one upstream quota). Retry those one at a time, with a pause, before
+                # drawing any conclusion.
+                for delay in self.retry_delays:
+                    pending = [i for i, r in enumerate(results) if r["transient"]]
+                    if not pending:
+                        break
+                    time.sleep(delay)
+                    for i in pending:
+                        r = _probe(client, self.base_url, headers, results[i]["model"], self.timeout)
+                        if r["available"]:
+                            self.working += 1
+                        results[i] = r
         except (httpx.HTTPError, ValueError, KeyError, TypeError) as e:
             self.status, self.error = "failed", f"{type(e).__name__}: {e}"[:200]
             return
 
+        # Still transient after retries: unknown, not unavailable. If the model worked last
+        # time, keep it listed as working (flagged) rather than hiding a model that is fine.
+        previous = _previously_working(self.output)
+        for r in results:
+            if r["transient"] and r["status_code"] not in RETRY_STATUS - TRANSIENT_STATUS:
+                r["available"] = None
+                prev = previous.get(r["model"])
+                if prev:
+                    r["available"] = True
+                    r["stale"] = True
+                    r["latency_ms"] = prev.get("latency_ms", r["latency_ms"])
+                    r["sample"] = prev.get("sample", "")
+
         working = sorted((r for r in results if r["available"]), key=lambda r: r["latency_ms"])
+        self.working = len(working)
         if not working:
             # A gateway outage or bad key would otherwise wipe the model list.
             self.status, self.error = "failed", "no model responded; kept the previous list"
@@ -145,7 +203,8 @@ class ModelScanner:
             "working_count": len(working),
             "working_models": [{"model": r["model"], "latency_ms": r["latency_ms"],
                                 "owner": owners.get(r["model"], ""), "sample": r["sample"],
-                                "context_length": context_lengths.get(r["model"])} for r in working],
+                                "context_length": context_lengths.get(r["model"]),
+                                **({"stale": True} if r.get("stale") else {})} for r in working],
             "all_results": results,
         }
         self.output.parent.mkdir(parents=True, exist_ok=True)

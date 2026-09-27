@@ -141,13 +141,21 @@ def provider_models(name: str) -> List[Dict[str, Any]]:
     except (OSError, ValueError):
         return []
     working = {m["model"]: m for m in data.get("working_models", []) if m.get("model")}
-    checked = {r["model"] for r in data.get("all_results", []) if r.get("model")}
+    results = {r["model"]: r for r in data.get("all_results", []) if isinstance(r, dict) and r.get("model")}
     out = [{"model": m, "category": "Available", "latency_ms": w.get("latency_ms"), "available": True,
            "context_length": w.get("context_length")} for m, w in working.items()]
     for m in data.get("all_ids", []):
-        if m not in working:
-            out.append({"model": m, "category": "Unavailable" if m in checked else "Not checked",
-                        "latency_ms": None, "available": False if m in checked else None})
+        if m in working:
+            continue
+        r = results.get(m)
+        if r is None:
+            out.append({"model": m, "category": "Not checked", "latency_ms": None, "available": None})
+        elif r.get("available") is None:
+            # Rate limited / timed out during the scan: unknown, not broken.
+            out.append({"model": m, "category": "Unknown", "latency_ms": None, "available": None,
+                        "note": r.get("reason", "")})
+        else:
+            out.append({"model": m, "category": "Unavailable", "latency_ms": None, "available": False})
     return out
 
 

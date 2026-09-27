@@ -61,12 +61,32 @@ def load_scanned_models(path: Path = SCAN_FILE) -> List[Dict[str, Any]]:
         return []
 
 
+def load_unknown_models(path: Path = SCAN_FILE) -> Dict[str, str]:
+    """Models the last scan could not judge (rate limited, timed out, overloaded) -> reason.
+    These are "unknown", not "unavailable": the model may work fine in a real chat."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            results = json.load(f).get("all_results", [])
+    except (OSError, ValueError):
+        return {}
+    return {r["model"]: r.get("reason", "") for r in results
+            if isinstance(r, dict) and r.get("model") and r.get("available") is None}
+
+
+def _availability(name: str, scanned: Dict[str, Any], unknown: Dict[str, str], have_scan: bool):
+    if not have_scan or name in unknown:
+        return None
+    return name in scanned
+
+
 def all_models() -> List[Dict[str, Any]]:
     """Curated models first, then any extra scanned ones.
 
-    Each entry has model, category, latency_ms and available (None when there is no scan yet).
+    Each entry has model, category, latency_ms and available (None when there is no scan yet,
+    or when the scan hit only rate limits/timeouts for that model).
     """
     scanned = {m["model"]: m for m in load_scanned_models() if m.get("model")}
+    unknown = load_unknown_models()
     have_scan = bool(scanned)
     out: List[Dict[str, Any]] = []
     seen = set()
@@ -74,7 +94,8 @@ def all_models() -> List[Dict[str, Any]]:
         for name in names:
             out.append({"model": name, "category": category,
                         "latency_ms": scanned.get(name, {}).get("latency_ms"),
-                        "available": (name in scanned) if have_scan else None,
+                        "available": _availability(name, scanned, unknown, have_scan),
+                        "note": unknown.get(name, ""),
                         "context_length": scanned.get(name, {}).get("context_length")})
             seen.add(name)
     for name, info in scanned.items():

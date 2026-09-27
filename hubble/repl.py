@@ -554,6 +554,8 @@ class Repl:
             for m in provider_models(pname):
                 if m.get("available") is False:
                     meta = f"unavailable · {m['category']}"
+                elif m.get("available") is None and m.get("note"):
+                    meta = f"unknown ({m['note']}) · {m['category']}"
                 elif m.get("available") is None and pname != DEFAULT_PROVIDER:
                     meta = "not checked"
                 else:
@@ -638,6 +640,8 @@ class Repl:
             if m.get("available") is False:
                 lat = "[red]unavailable[/red]"
                 label = f"[dim]{label}[/dim]"
+            elif m.get("available") is None and m.get("note"):
+                lat = f"[yellow]unknown ({escape(m['note'])})[/yellow]"
             else:
                 lat = f"{m['latency_ms']} ms" if m.get("latency_ms") else "-"
             table.add_row(str(i), label, m["category"], lat)
