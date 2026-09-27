@@ -110,6 +110,11 @@ def main(argv=None):
         allow_secrets=bool(settings.get("allow_secret_files")),
         shell_argv=detect_shell(settings.get("shell", "auto")),
         shell_timeout=int(settings.get("shell_timeout", 120)),
+        sandbox=settings.get("shell_sandbox", "off"),
+        sandbox_image=settings.get("sandbox_image", "python:3.12-slim"),
+        sandbox_memory=settings.get("sandbox_memory", "1g"),
+        sandbox_cpus=str(settings.get("sandbox_cpus", "2")),
+        sandbox_network=bool(settings.get("sandbox_network", True)),
     )
     perms = Permissions(settings["permission_mode"],
                         allow=settings["permissions"].get("allow", []) + args.allow,

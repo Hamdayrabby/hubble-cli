@@ -116,7 +116,14 @@ class Agent:
     def system_prompt(self) -> str:
         if self.system_override:
             return self.system_override
-        return build_system_prompt(self.ctx.root, self.persona, shell_name(self.ctx.shell_argv), self.model,
+        if self.ctx.sandbox == "docker":
+            shell_label = (f"an isolated Docker container (image {self.ctx.sandbox_image}), reached via "
+                          f"`sh -lc`; use POSIX/Linux syntax regardless of the host OS. Only /workspace "
+                          f"(this project) is visible inside it"
+                          + ("" if self.ctx.sandbox_network else "; it has no network access"))
+        else:
+            shell_label = shell_name(self.ctx.shell_argv)
+        return build_system_prompt(self.ctx.root, self.persona, shell_label, self.model,
                                    self.pinned, self.memory, self.permissions.mode,
                                    skills_prompt_block(self.skills))
 

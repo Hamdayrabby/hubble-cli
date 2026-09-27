@@ -29,6 +29,11 @@ DEFAULTS: Dict[str, Any] = {
     "shell": "auto",
     "shell_timeout": 120,
     "additional_dirs": [],
+    "shell_sandbox": "off",  # "docker" runs shell commands in an isolated, resource-capped container
+    "sandbox_image": "python:3.12-slim",
+    "sandbox_memory": "1g",
+    "sandbox_cpus": "2",
+    "sandbox_network": True,
     "allow_secret_files": False,
     "model_refresh_hours": 0,  # 0 = always check on startup; set hours to only recheck when stale
     "fallback_model": "codestral-latest",
@@ -93,7 +98,8 @@ def _merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
 
 # A cloned repository must not be able to loosen security or redirect the API key.
 NEVER_FROM_PROJECT = {"base_url", "api_key"}
-TRUSTED_ONLY = {"permission_mode", "allow_secret_files", "additional_dirs", "shell"}
+TRUSTED_ONLY = {"permission_mode", "allow_secret_files", "additional_dirs", "shell",
+                "shell_sandbox", "sandbox_network"}
 TRUST_FILE = HOME_DIR / "trusted_folders.json"
 
 

@@ -73,6 +73,11 @@ class ToolContext:
     allow_secrets: bool = False
     shell_argv: List[str] = field(default_factory=lambda: detect_shell())
     shell_timeout: int = 120
+    sandbox: str = "off"  # "off" | "docker": run shell commands in an isolated container
+    sandbox_image: str = "python:3.12-slim"
+    sandbox_memory: str = "1g"
+    sandbox_cpus: str = "2"
+    sandbox_network: bool = True
     read_mtimes: Dict[str, float] = field(default_factory=dict)
     todos: List[Dict[str, str]] = field(default_factory=list)
     # One dict per agent turn: absolute path -> original bytes (None if the file did not exist).
@@ -411,6 +416,11 @@ class Shell(Tool):
     def run(self, args, ctx):
         cmd = args["command"]
         timeout = max(1, min(int(args.get("timeout") or ctx.shell_timeout), 600))
+        if ctx.sandbox == "docker":
+            return self._run_docker(cmd, timeout, ctx)
+        return self._run_host(cmd, timeout, ctx)
+
+    def _run_host(self, cmd: str, timeout: int, ctx: ToolContext) -> str:
         argv = list(ctx.shell_argv)
         if "powershell" in argv[0].lower() or "pwsh" in argv[0].lower():
             cmd = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; " + cmd
@@ -436,13 +446,62 @@ class Shell(Tool):
             _kill_tree(proc)
             _drain(proc)
             raise
-        parts = []
-        if stdout.strip():
-            parts.append(stdout.rstrip())
-        if stderr.strip():
-            parts.append(f"[stderr]\n{stderr.rstrip()}")
-        parts.append(f"[exit code {proc.returncode}]")
-        return truncate("\n".join(parts))
+        return _format_result(stdout, stderr, proc.returncode)
+
+    def _run_docker(self, cmd: str, timeout: int, ctx: ToolContext) -> str:
+        docker = shutil.which("docker")
+        if not docker:
+            raise ToolError("sandbox is set to 'docker' but the docker CLI was not found on PATH. "
+                            "Install Docker Desktop, or set shell_sandbox to \"off\".")
+        import uuid
+        name = f"hubble-sandbox-{uuid.uuid4().hex[:12]}"
+        argv = [docker, "run", "--rm", "--name", name, "-i",
+                "--memory", ctx.sandbox_memory, "--cpus", ctx.sandbox_cpus,
+                "-v", f"{ctx.root}:/workspace", "-w", "/workspace"]
+        if not ctx.sandbox_network:
+            argv += ["--network", "none"]
+        argv += [ctx.sandbox_image, "sh", "-lc", cmd]
+        try:
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+        except OSError as e:
+            raise ToolError(f"Could not start docker: {e}")
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self._docker_kill(docker, name)
+            stdout, stderr = _drain(proc)
+            raise ToolError(f"Command timed out after {timeout}s (sandbox container killed). "
+                            "Long-running servers are not supported.\n" + truncate(stdout or "", 5000))
+        except KeyboardInterrupt:
+            self._docker_kill(docker, name)
+            _drain(proc)
+            raise
+        if proc.returncode == 125 and "Unable to find image" in (stderr or ""):
+            raise ToolError(f"Sandbox image '{ctx.sandbox_image}' could not be pulled.\n{stderr.strip()}")
+        if proc.returncode == 125 and "docker daemon" in (stderr or "").lower():
+            raise ToolError("Docker is installed but the daemon isn't running. Start Docker Desktop, "
+                            f"or set shell_sandbox to \"off\".\n{stderr.strip()}")
+        return _format_result(stdout, stderr, proc.returncode)
+
+    @staticmethod
+    def _docker_kill(docker: str, name: str):
+        # Kill by container name directly: killing the `docker run` client process does not
+        # reliably stop the container itself, so the client kill alone is not enough.
+        try:
+            subprocess.run([docker, "kill", name], capture_output=True, stdin=subprocess.DEVNULL, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def _format_result(stdout: str, stderr: str, returncode: int) -> str:
+    parts = []
+    if stdout.strip():
+        parts.append(stdout.rstrip())
+    if stderr.strip():
+        parts.append(f"[stderr]\n{stderr.rstrip()}")
+    parts.append(f"[exit code {returncode}]")
+    return truncate("\n".join(parts))
 
 
 def _kill_tree(proc: subprocess.Popen):

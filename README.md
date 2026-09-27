@@ -66,6 +66,36 @@ Safety:
 - **Edits need a fresh read:** a file must be read before it is edited or overwritten, and read again if it changed on disk since.
 - **Undo:** every change is snapshotted, so `/undo` can revert it.
 
+**Shell commands are not sandboxed by default** — they run directly on your machine with your own
+permissions, same as anything you'd type yourself. Approval prompts are the only protection unless you
+turn on the Docker sandbox below.
+
+### Sandboxed shell execution (optional)
+
+With [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed, shell commands can run
+inside an isolated, disposable container instead of directly on your machine:
+
+```
+/sandbox on
+```
+or in `~/.hubble/settings.json` / `.hubble/settings.json`:
+```json
+{
+  "shell_sandbox": "docker",
+  "sandbox_image": "python:3.12-slim",
+  "sandbox_memory": "1g",
+  "sandbox_cpus": "2",
+  "sandbox_network": true
+}
+```
+Only the project folder is mounted in (as `/workspace`); nothing else on your machine is reachable from
+inside it. Memory and CPU are capped, and the container is removed after every command. Set
+`sandbox_image` to whatever your project needs (e.g. `node:20` for a JS project); set `sandbox_network` to
+`false` to also block network access from inside the sandbox, if your workflow doesn't need `pip`/`npm`
+install-style commands. Like `permission_mode`, `shell_sandbox` and `sandbox_network` only take effect from
+a project's own `.hubble/settings.json` once you've trusted that folder — an untrusted, freshly cloned
+project can't quietly turn sandboxing off or re-enable network access on your behalf.
+
 ## Permission modes
 
 Cycle with **Shift+Tab** or set with `/mode` or `--permission-mode`:

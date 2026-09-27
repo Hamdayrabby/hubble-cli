@@ -1,3 +1,6 @@
+import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -230,3 +233,78 @@ def test_web_permissions_per_domain():
     p.mode = "plan"
     assert p.check("web_fetch", "web", "evil.example")[0] == "ask"      # allowed to ask while planning
     assert p.check("web_search", "read", "anything")[0] == "allow"
+
+
+def test_docker_sandbox_argv_and_mounts(ctx, tmp_path, monkeypatch):
+    ctx.sandbox = "docker"
+    ctx.sandbox_image = "python:3.12-slim"
+    ctx.sandbox_memory = "512m"
+    ctx.sandbox_cpus = "1"
+    ctx.sandbox_network = False
+    captured = {}
+
+    class FakeProc:
+        returncode = 0
+        def communicate(self, timeout=None):
+            return "ran inside sandbox\n", ""
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        return FakeProc()
+
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/docker" if name == "docker" else None)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    out, err = run_tool(Shell(), {"command": "echo hi"}, ctx)
+    assert not err and "ran inside sandbox" in out
+    argv = captured["argv"]
+    assert argv[0] == "/usr/bin/docker" and argv[1] == "run"
+    assert "--rm" in argv and "--network" in argv and argv[argv.index("--network") + 1] == "none"
+    assert "-v" in argv
+    mount = argv[argv.index("-v") + 1]
+    assert mount == f"{ctx.root}:/workspace" and argv[argv.index("-w") + 1] == "/workspace"
+    assert "512m" in argv and "1" in argv and "python:3.12-slim" in argv
+    assert argv[-3:] == ["sh", "-lc", "echo hi"]
+
+
+def test_docker_sandbox_missing_binary(ctx, monkeypatch):
+    ctx.sandbox = "docker"
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    out, err = run_tool(Shell(), {"command": "echo hi"}, ctx)
+    assert err and "docker CLI was not found" in out
+
+
+def test_docker_sandbox_daemon_not_running(ctx, monkeypatch):
+    ctx.sandbox = "docker"
+
+    class FakeProc:
+        returncode = 125
+        def communicate(self, timeout=None):
+            return "", "Cannot connect to the Docker daemon at ..."
+
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/docker" if name == "docker" else None)
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kw: FakeProc())
+    out, err = run_tool(Shell(), {"command": "echo hi"}, ctx)
+    assert err and "daemon isn't running" in out
+
+
+def test_docker_sandbox_timeout_kills_by_container_name(ctx, monkeypatch):
+    ctx.sandbox = "docker"
+    killed = []
+
+    class FakeProc:
+        def communicate(self, timeout=None):
+            raise subprocess.TimeoutExpired(cmd="docker", timeout=timeout)
+
+    def fake_run(argv, **kwargs):
+        if argv[1] == "kill":
+            killed.append(argv[2])
+        class R:
+            returncode = 0
+        return R()
+
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/docker" if name == "docker" else None)
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kw: FakeProc())
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    out, err = run_tool(Shell(), {"command": "sleep 999", "timeout": 1}, ctx)
+    assert err and "timed out" in out and "sandbox container killed" in out
+    assert len(killed) == 1 and killed[0].startswith("hubble-sandbox-")

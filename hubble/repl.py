@@ -2,6 +2,7 @@
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -141,6 +142,8 @@ class Repl:
         r("fallback", self.cmd_fallback, "Choose the model used when the current one is rate limited",
           args="[model|auto|off]")
         r("thinking", self.cmd_thinking, "Show or hide the model's reasoning text", args="[on|off]")
+        r("sandbox", self.cmd_sandbox, "Run shell commands in an isolated Docker container instead of "
+          "directly on this machine", args="[on|off]")
         r("config", self.cmd_config, "Show effective settings and allow/deny rules")
         r("export", self.cmd_export, "Export conversation to markdown", ("copy",), "[file]")
         r("skills", self.cmd_skills, "List skills (the model can also call these on its own)")
@@ -880,6 +883,29 @@ class Repl:
         state = "shown" if ev.show_reasoning else "hidden (the spinner counts thinking tokens)"
         save_user_setting("show_reasoning", ev.show_reasoning)
         console.print(f"[green]Reasoning text {state}.[/green]")
+
+    def cmd_sandbox(self, arg):
+        ctx = self.agent.ctx
+        arg = arg.lower().strip()
+        if arg in ("on", "docker"):
+            if not shutil.which("docker"):
+                console.print("[red]docker was not found on PATH. Install Docker Desktop first.[/red]")
+                return
+            ctx.sandbox = "docker"
+        elif arg == "off":
+            ctx.sandbox = "off"
+        elif arg:
+            console.print("Usage: /sandbox [on|off]")
+            return
+        if arg:
+            self.agent.settings["shell_sandbox"] = ctx.sandbox
+            save_user_setting("shell_sandbox", ctx.sandbox)
+        if ctx.sandbox == "docker":
+            net = "with network access" if ctx.sandbox_network else "network disabled"
+            console.print(f"[green]Sandbox: docker[/green] [dim](image {ctx.sandbox_image}, "
+                          f"{ctx.sandbox_memory} mem, {ctx.sandbox_cpus} cpu, {net})[/dim]")
+        else:
+            console.print("[yellow]Sandbox: off[/yellow] [dim](shell commands run directly on this machine)[/dim]")
 
     def cmd_temp(self, arg):
         if not arg:
