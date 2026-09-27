@@ -25,6 +25,37 @@ def _logo_rows(word: str = NAME.upper()) -> List[str]:
     return ["".join(_LETTERS[ch][row] for ch in word) for row in range(6)]
 
 
+# Large logo: 5x7 pixel letters, each pixel two cells wide (terminal cells are about twice as
+# tall as wide, so this keeps pixels square), with a dim drop shadow one cell down-right.
+_PIXELS = {
+    "H": ["X...X", "X...X", "X...X", "XXXXX", "X...X", "X...X", "X...X"],
+    "U": ["X...X", "X...X", "X...X", "X...X", "X...X", "X...X", ".XXX."],
+    "B": ["XXXX.", "X...X", "X...X", "XXXX.", "X...X", "X...X", "XXXX."],
+    "L": ["X....", "X....", "X....", "X....", "X....", "X....", "XXXXX"],
+    "E": ["XXXXX", "X....", "X....", "XXXX.", "X....", "X....", "XXXXX"],
+}
+
+
+def _big_logo_rows(word: str = NAME.upper()) -> List[str]:
+    cells = []
+    for r in range(7):
+        line = ""
+        for ch in word:
+            line += "".join("██" if p == "X" else "  " for p in _PIXELS[ch][r]) + "  "
+        cells.append(list(line.rstrip() + " "))
+    cells.append([" "] * len(cells[0]))
+    width = max(len(r) for r in cells)
+    grid = [row + [" "] * (width - len(row)) for row in cells]
+    for r in range(len(grid) - 1, 0, -1):
+        for c in range(width - 1, 0, -1):
+            if grid[r][c] == " " and grid[r - 1][c - 1] == "█":
+                grid[r][c] = "░"
+    return ["".join(row).rstrip() for row in grid]
+
+
+BIG_LOGO_WIDTH = max(len(r) for r in _big_logo_rows())
+
+
 def _blend(stops: List[Tuple[int, int, int]], t: float) -> str:
     t = min(max(t, 0.0), 1.0) * (len(stops) - 1)
     i = min(int(t), len(stops) - 2)
@@ -406,28 +437,33 @@ def compose_grid(width: int, height: int, t: float, status: List[Text], tips: Li
     """
     width = max(40, min(width - 1, 110))
     height = max(height, 1)
-    big_logo = width >= 58
+    # Logo sizes: 2 = large pixel letters, 1 = block letters, 0 = one-line wordmark.
+    logo_h = {2: 9, 1: 7, 0: 1}  # letter rows + shadow row + tagline
+    top = 2 if width >= BIG_LOGO_WIDTH + 4 else (1 if width >= 58 else 0)
+    mid = min(top, 1)
     # Richest to poorest. Below a plain small-logo layout, keep shrinking the status block itself
     # (never just tips) so something animated always fits, all the way down to the logo line alone.
     n_status = len(status)
     layouts = [
-        (big_logo, FULL, True, n_status), (big_logo, COMPACT, True, n_status),
-        (big_logo, COMPACT, False, n_status), (False, COMPACT, False, n_status),
-        (False, None, True, n_status), (False, None, False, n_status),
-        (False, None, False, min(2, n_status)), (False, None, False, min(1, n_status)),
-        (False, None, False, 0),
+        (top, FULL, True, n_status), (top, COMPACT, True, n_status),
+        (mid, FULL, True, n_status), (mid, COMPACT, True, n_status),
+        (top, COMPACT, False, n_status), (mid, COMPACT, False, n_status), (0, COMPACT, False, n_status),
+        (top, None, True, n_status), (0, None, True, n_status), (0, None, False, n_status),
+        (0, None, False, min(2, n_status)), (0, None, False, min(1, n_status)),
+        (0, None, False, 0),
     ]
-    use_big, art, with_tips, n_status = layouts[-1]
-    for cand_big, cand_art, cand_tips, cand_n in layouts:
+    size, art, with_tips, n_status = layouts[-1]
+    for cand_size, cand_art, cand_tips, cand_n in layouts:
         if cand_art is not None and width < cand_art.width + 24:
             continue
-        need = (7 if cand_big else 1) + 1 + (cand_art.height + 1 if cand_art else 0) + cand_n + \
+        need = logo_h[cand_size] + 1 + (cand_art.height + 1 if cand_art else 0) + cand_n + \
             (1 + len(tips) if cand_tips else 0) + 1
         if need <= height:
-            use_big, art, with_tips, n_status = cand_big, cand_art, cand_tips, cand_n
+            size, art, with_tips, n_status = cand_size, cand_art, cand_tips, cand_n
             break
     status = status[:n_status]
-    logo_h = 7 if use_big else 1
+    use_big = size > 0
+    logo_h = logo_h[size]
 
     rows_total = logo_h + 1 + (art.height + 1 if art else 0) + len(status) + (1 + len(tips) if with_tips else 0) + 1
     rows_total = min(rows_total, height) if rows_total > height else rows_total  # never exceed the budget
@@ -436,7 +472,7 @@ def compose_grid(width: int, height: int, t: float, status: List[Text], tips: Li
 
     row = 0
     if use_big:
-        logo = _logo_rows()
+        logo = _big_logo_rows() if size == 2 else _logo_rows()
         lw = max(len(r) for r in logo)
         for r, line in enumerate(logo):
             # Letters shimmer: the gradient slowly slides across the word.
@@ -445,7 +481,7 @@ def compose_grid(width: int, height: int, t: float, status: List[Text], tips: Li
                 if 2 + c < width:
                     shade = _blend(GRADIENT, ((c / max(lw - 1, 1)) + t * 0.08) % 1.0)
                     grid[row + r][2 + c] = (ch, (shade if ch == "█" else f"{shade} dim") if ch != " " else "")
-        _stamp_text(grid, row + 6, 4, Text.assemble(("your model hub for code", "italic #8787af"),
+        _stamp_text(grid, row + len(logo), 4, Text.assemble(("your model hub for code", "italic #8787af"),
                                                     ("   v" + version, "dim")))
     else:
         _stamp_text(grid, row, 2, Text.assemble(small_logo(), ("  v" + version, "dim")))

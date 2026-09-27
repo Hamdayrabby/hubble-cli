@@ -89,6 +89,7 @@ class Repl:
         self.clients: Dict[str, OpenAICompatProvider] = {agent.provider_name: agent.provider}
         self.scanners: Dict[str, ModelScanner] = {}
         self._unannounced: set = set()
+        self._quiet_scans: set = set()  # startup scans: say nothing unless they fail
         self.turn_stats = None
         self.agent = agent
         agent.fallback_resolver = self.fallback_for
@@ -328,7 +329,7 @@ class Repl:
             self.clients[name] = OpenAICompatProvider(cfg.base_url, cfg.api_key)
         return self.clients[name]
 
-    def start_scan(self, name: str, reason: str) -> bool:
+    def start_scan(self, name: str, reason: str, quiet: bool = False) -> bool:
         cfg = self.providers.get(name)
         if not cfg:
             return False
@@ -338,8 +339,12 @@ class Repl:
         if not scanner.start():
             return False
         self._unannounced.add(name)
-        console.print(f"[dim]  {reason} Checking which {escape(name)} models are available in the background "
-                      "(progress in the bottom bar)...[/dim]")
+        if quiet:
+            self._quiet_scans.add(name)
+        else:
+            self._quiet_scans.discard(name)
+            console.print(f"[dim]  {reason} Checking which {escape(name)} models are available in the background "
+                          "(progress in the bottom bar)...[/dim]")
         return True
 
     def _announce_scans(self):
@@ -348,7 +353,9 @@ class Repl:
             if not scanner or scanner.running:
                 continue
             self._unannounced.discard(name)
-            if scanner.status == "done":
+            quiet = name in self._quiet_scans
+            self._quiet_scans.discard(name)
+            if scanner.status == "done" and not quiet:
                 console.print(f"[green]{escape(name)}: {scanner.working} of {scanner.total} models are "
                               "available.[/green] [dim]/model to see them[/dim]")
             elif scanner.status == "failed":
@@ -365,9 +372,8 @@ class Repl:
                 continue
             age = scan_age_hours(scan_file(name))
             if age is None or hours <= 0 or age >= hours:
-                reason = "Model list is missing." if age is None else (
-                    "Checking on startup." if hours <= 0 else f"Model list is {age:.0f}h old.")
-                self.start_scan(name, reason)
+                # Silent: the bottom bar already shows progress, and only a failure is worth a line.
+                self.start_scan(name, "", quiet=True)
 
     def run(self, initial_prompt: Optional[str] = None):
         self._home = None
