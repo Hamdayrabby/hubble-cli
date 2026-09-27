@@ -529,7 +529,17 @@ def _drain(proc: subprocess.Popen):
 
 def _is_link(p: Path) -> bool:
     try:
-        return p.is_symlink() or p.is_junction()
+        if p.is_symlink():
+            return True
+        # Path.is_junction() only exists from Python 3.12; fall back to the win32 reparse-point
+        # bit on older versions so a Windows junction is still refused pre-3.12, not skipped.
+        is_junction = getattr(p, "is_junction", None)
+        if is_junction is not None:
+            return is_junction()
+        if sys.platform == "win32":
+            attrs = getattr(p.stat(), "st_file_attributes", 0)
+            return bool(attrs & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
+        return False
     except OSError:
         return True
 

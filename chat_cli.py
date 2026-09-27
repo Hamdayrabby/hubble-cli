@@ -797,6 +797,8 @@ Tip: Type {c('/models', Style.BOLD)} to see all 33 models | {c('/help', Style.BO
 
 
 def print_help():
+    dq3 = '"' * 3  # kept out of the f-string body: a literal """ inside an f"""...""" confuses
+                   # the pre-3.12 tokenizer (which has no expression-aware lookahead in f-strings)
     help_text = f"""
 {c('Hubble Legacy CLI Commands:', Style.BOLD + Style.CYAN)}
 
@@ -821,7 +823,7 @@ def print_help():
   {c('/temp [0.0-2.0]', Style.BOLD)}   Adjust model temperature (lower = more deterministic)
   {c('/clear', Style.BOLD)}            Clear conversation history
   {c('/copy [file]', Style.BOLD)}      Export entire session to markdown
-  {c('<<<', Style.BOLD)} or {c('\"\"\"', Style.BOLD)}        Enter multi-line paste mode (end with {c('>>>', Style.BOLD)} or {c('\"\"\"', Style.BOLD)})
+  {c('<<<', Style.BOLD)} or {c(dq3, Style.BOLD)}        Enter multi-line paste mode (end with {c('>>>', Style.BOLD)} or {c(dq3, Style.BOLD)})
   {c('/exit', Style.BOLD)} or {c('/quit', Style.BOLD)}    Exit session
 """
     print(help_text)
