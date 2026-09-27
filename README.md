@@ -8,9 +8,9 @@ OpenAI, Groq, OpenRouter, Mistral, a local Ollama server, or others via `/provid
 ## Install
 
 ```bash
-pipx install git+https://github.com/Hamdayrabby/hubble-cli.git
+pipx install hubble-cli
 ```
-(or `pip install --user git+https://github.com/Hamdayrabby/hubble-cli.git` if you don't use pipx)
+(or `pip install --user hubble-cli`; the latest unreleased code: `pipx install git+https://github.com/Hamdayrabby/hubble-cli.git`)
 
 Then just run it from any project:
 
@@ -40,9 +40,16 @@ hubble -c                                # continue the latest session in this f
 hubble -r                                # choose a session to resume
 hubble -p "fix the failing test" --permission-mode accept-edits --allow "shell(pytest*)"
 git diff | hubble -p "review this diff" --output-format json
+hubble -p "run the tests" --output-format stream-json   # one JSON event per line, as it happens
+hubble -p "what is wrong in this UI?" --image screenshot.png
+hubble -w refactor-auth                  # work in an isolated git worktree on branch hubble/refactor-auth
 hubble -m nvidia/nemotron-3-super-120b-a12b --persona architect
 hubble --test codestral-latest           # check that a model responds
 ```
+
+`stream-json` lines have a `type`: `init`, `text` (streamed delta), `assistant` (one model call, with its
+tool calls and usage), `tool_use`, `tool_result`, `todos`, `notice`, `subagent_start`, `subagent_end`, and
+always last `result` (the same fields as `--output-format json`).
 
 ## Tools the model can use
 
@@ -56,10 +63,10 @@ hubble --test codestral-latest           # check that a model responds
 | `glob` | Find files by pattern, newest first |
 | `list_dir` | List a directory |
 | `todo_write` | Task list for multi-step work, shown in the terminal |
-| `task` | Sub-agent for one self-contained piece of work: `read_only` (default) for research, returns a report; `edit` for a delegated implementation task, with its own file/shell tools — its edits and commands still ask for approval the same way yours would. Several `read_only` tasks in one turn run in parallel; an `edit` task always runs on its own. Can target a different model per task. |
+| `task` | Sub-agent for one self-contained piece of work: `read_only` (default) for research, returns a report; `edit` for a delegated implementation task, with its own file/shell tools — its edits and commands still ask for approval the same way yours would. Several `read_only` tasks in one turn run in parallel; an `edit` task always runs on its own. Can target a different model per task, a [custom agent](#custom-agents) (`agent`), and `isolation: "worktree"` to do its edits in a fresh git worktree on its own branch. |
 | `web_search` | Web search. DuckDuckGo by default (no key); set `BRAVE_API_KEY` or `TAVILY_API_KEY` to use those instead |
 | `web_fetch` | Fetch a URL as readable text, page by page (`offset`). Asks once per domain; refuses local and private addresses |
-| `mcp__<server>__<tool>` | Tools from any MCP server you've configured (see [MCP servers](#mcp-servers) below) |
+| `mcp__<server>__<tool>` | Tools from any MCP server you've configured, plus `list_resources`/`read_resource` for servers that offer resources (see [MCP servers](#mcp-servers) below) |
 
 Safety:
 - **Workspace confinement:** paths outside the workspace are refused. Add others with `additional_dirs`.
@@ -67,17 +74,34 @@ Safety:
 - **Edits need a fresh read:** a file must be read before it is edited or overwritten, and read again if it changed on disk since.
 - **Undo:** every change is snapshotted, so `/undo` can revert it.
 
-**Shell commands are not sandboxed by default** — they run directly on your machine with your own
-permissions, same as anything you'd type yourself. Approval prompts are the only protection unless you
-turn on the Docker sandbox below.
+### Sandboxed shell execution
 
-### Sandboxed shell execution (optional)
+On **macOS and Linux, shell commands run in an OS sandbox by default** (`"shell_sandbox": "auto"`), like
+Codex: a command can read anything but can only write inside the workspace and temp directories (and any
+`sandbox_writable` paths you add). macOS uses the built-in `sandbox-exec` (Seatbelt); Linux uses
+[bubblewrap](https://github.com/containers/bubblewrap) (`sudo apt install bubblewrap`). If a command
+genuinely needs to write elsewhere — a global install, a config file in your home folder — the model
+retries it with `unsandboxed: true`, and **you are always asked first**, even in accept-edits mode or with a
+matching allow rule (only `yolo` skips that).
 
-With [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed, shell commands can run
-inside an isolated, disposable container instead of directly on your machine:
+**On Windows there is no built-in equivalent**, so commands run directly on your machine with your own
+permissions, and approval prompts are the protection — unless you use the Docker sandbox below.
+
+`/sandbox` shows the current state; `/sandbox auto|native|docker|off` changes it.
+
+```json
+{
+  "shell_sandbox": "auto",
+  "sandbox_network": true,
+  "sandbox_writable": ["~/.cache/pip", "~/.npm"]
+}
+```
+
+**Docker sandbox** (any OS, needs [Docker Desktop](https://www.docker.com/products/docker-desktop/)): shell
+commands run inside an isolated, disposable container instead of on your machine:
 
 ```
-/sandbox on
+/sandbox docker
 ```
 or in `~/.hubble/settings.json` / `.hubble/settings.json`:
 ```json
@@ -93,26 +117,40 @@ Only the project folder is mounted in (as `/workspace`); nothing else on your ma
 inside it. Memory and CPU are capped, and the container is removed after every command. Set
 `sandbox_image` to whatever your project needs (e.g. `node:20` for a JS project); set `sandbox_network` to
 `false` to also block network access from inside the sandbox, if your workflow doesn't need `pip`/`npm`
-install-style commands. Like `permission_mode`, `shell_sandbox` and `sandbox_network` only take effect from
+install-style commands. Like `permission_mode`, `shell_sandbox`, `sandbox_network` and `sandbox_writable` only take effect from
 a project's own `.hubble/settings.json` once you've trusted that folder — an untrusted, freshly cloned
 project can't quietly turn sandboxing off or re-enable network access on your behalf.
 
 ### MCP servers
 
-Connect any [MCP](https://modelcontextprotocol.io/) server (stdio transport only — SSE/HTTP servers
-aren't supported yet) and its tools become available to the model, namespaced as `mcp__<server>__<tool>`:
+Connect any [MCP](https://modelcontextprotocol.io/) server — local (stdio) or remote (Streamable HTTP, or
+the older HTTP+SSE transport) — and its tools become available to the model, namespaced as
+`mcp__<server>__<tool>`:
 
 ```json
 {
   "mcp_servers": {
     "filesystem": {"command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/path/to/share"]},
-    "git": {"command": ["uvx", "mcp-server-git"]}
+    "git": {"command": ["uvx", "mcp-server-git"]},
+    "linear": {"url": "https://mcp.linear.app/mcp"},
+    "internal": {"url": "https://mcp.example.com/sse", "transport": "sse",
+                 "headers": {"Authorization": "Bearer ${INTERNAL_MCP_TOKEN}"}}
   }
 }
 ```
-A server that fails to start or handshake is skipped with a warning, not a crash. Like the sandbox
-settings, `mcp_servers` only takes effect from a project's own `.hubble/settings.json` once you've trusted
-that folder — a cloned repo can't have you unknowingly launch arbitrary processes.
+- `${VAR}` in `url`, `headers` and `env` is read from the environment, so tokens stay out of the file.
+- `transport` is `auto` by default: Streamable HTTP, falling back to HTTP+SSE for older servers.
+- **OAuth:** a remote server that answers 401 shows as "needs login". Run `/mcp login <server>`: Hubble
+  discovers the authorization server, registers itself (or uses `"oauth": {"client_id": "..."}`), opens
+  your browser, and keeps the token in your OS credential store, refreshing it automatically.
+  `/mcp logout <server>` forgets it.
+- **Resources** a server offers are readable by the model through `list_resources`/`read_resource`.
+- **Prompts** a server offers become slash commands: `/mcp__<server>__<prompt> key=value ...`.
+
+`/mcp` lists servers, their tools and prompts, and which need a login. A server that fails to start or
+handshake is skipped with a warning, not a crash. Like the sandbox settings, `mcp_servers` only takes effect
+from a project's own `.hubble/settings.json` once you've trusted that folder — a cloned repo can't have you
+unknowingly launch arbitrary processes.
 
 ### Hooks
 
@@ -142,8 +180,89 @@ happens next through its exit code and stdout:
 - Anything else on stdout is just logged, not acted on.
 
 `matcher` filters by tool name (glob, e.g. `"shell"` or `"mcp__*"`); omit it to run on every event of that
-type. Hooks run on the host, not inside the Docker sandbox, and — like `mcp_servers` — only take effect
-once you've trusted the project.
+type. Hooks run on the host, not inside the sandbox, and — like `mcp_servers` — only take effect once
+you've trusted the project.
+
+All events:
+
+| Event | When | Can |
+|---|---|---|
+| `SessionStart` | Hubble starts or resumes (`source`: startup / resume) | `additionalContext` is added to the system prompt for the session |
+| `UserPromptSubmit` | You send a message | block it, or add context |
+| `PreToolUse` | Before a tool runs | block it |
+| `PostToolUse` | After a tool runs | add context to its result |
+| `Notification` | Hubble is waiting for your approval | observe (e.g. desktop notification) |
+| `PreCompact` | Before history is compacted (`trigger`: auto / manual) | block compaction |
+| `SubagentStop` | A `task` sub-agent finished | add context to its report |
+| `Stop` | The turn is about to end | block = keep going with `reason` as the next instruction |
+| `SessionEnd` | Hubble exits | observe |
+
+## Custom agents
+
+Named specialists the model can delegate to with the `task` tool. One Markdown file each, in
+`.hubble/agents/` (project) or `~/.hubble/agents/` (user):
+
+```markdown
+---
+name: test-writer
+description: Writes focused pytest tests for a module. Use after adding or changing a feature.
+tools: read_file, grep, glob, write_file, edit_file, shell   # optional: narrows its toolset
+model: codestral-latest                                       # optional: its own model
+capability: edit                                              # read_only (default) or edit
+---
+You write small, fast pytest tests. Cover the edge cases first. Run the tests before reporting.
+```
+
+Only the name and description are shown to the main model, so many agents cost little. A `read_only`
+agent never gets edit tools, whatever its `tools` line says. `/agents` lists them; `/agents new <name>`
+creates a template.
+
+## Plugins
+
+A plugin is one folder that bundles commands, skills, agents, hooks and MCP servers, so a team can share a
+whole setup:
+
+```
+my-plugin/
+  plugin.json     {"name": "my-plugin", "version": "1.0.0", "description": "...",
+                   "hooks": {...}, "mcp_servers": {...}}      # same shape as in settings.json
+  commands/*.md   agents/*.md   skills/<name>/SKILL.md
+```
+`${PLUGIN_DIR}` in a hook or MCP command points at the plugin's folder, so it can ship its own scripts.
+
+`/plugin install <folder or git URL> [--project]`, `/plugin list`, `/plugin disable|enable <name>`,
+`/plugin remove <name>`. Hooks and MCP servers from a *project* plugin only load once you trust the folder.
+
+## Images
+
+Attach screenshots or diagrams for a vision-capable model: mention `@shot.png` in a message, press
+**Alt+V** to paste an image from the clipboard (shows as `[Image #1]`), or pass `--image file.png` with
+`-p`. PNG, JPEG, GIF, WebP and BMP up to 8 MB. Models without vision support usually answer with an error.
+
+## Git worktrees
+
+Work on something risky, or several things at once, without touching your main checkout:
+
+- `hubble -w <name>` or `/worktree new <name>` creates `.hubble/worktrees/<name>` on branch `hubble/<name>`
+  and moves every tool there. `/worktree exit` goes back; `/worktree switch <name>`, `/worktree list`,
+  `/worktree remove <name> [--force] [--delete-branch]`.
+- The folder is added to `.git/info/exclude`, so it never shows up in `git status`.
+- A `task` with `isolation: "worktree"` makes an edit sub-agent work in a fresh worktree. Its file edits
+  there need no approval (they can't touch your checkout); its shell commands still ask. When it finishes,
+  its changes are committed on their own branch and the main model is told how to review and
+  cherry-pick them.
+
+## GitHub integration
+
+`/install-github` writes `.github/workflows/hubble.yml`. After you add a `HUBBLE_API_KEY` repository
+secret (and optionally `HUBBLE_MODEL` / `HUBBLE_BASE_URL` variables):
+- every pull request from the same repository gets a review comment;
+- `@hubble <request>` in an issue, or a PR comment, gets an answer. On a pull request Hubble can make the
+  requested change, and the workflow pushes it to the PR branch.
+
+Only the repository's owners, members and collaborators can trigger it, since a mention runs an agent with
+your API key and push access; comment text is never pasted into a shell script. Under the hood this is
+`hubble -p --github`, which reads the Actions event and posts the reply with `GITHUB_TOKEN`.
 
 ## Permission modes
 
@@ -181,7 +300,12 @@ Allow rules never apply to chained commands (`&&`, `;`, `|`, redirects), so `she
 | `/memory` | Show loaded memory files |
 | `/add <file>`, `/drop <file>`, `/files` | Pin files into the system prompt |
 | `/todos`, `/cost`, `/context`, `/config`, `/test [model]`, `/temp [t]`, `/export [file]` | Info and utilities |
-| `@path` | Attach a file (or directory listing) to your message; Tab completes paths |
+| `/sandbox`, `/mcp`, `/hooks` | Sandbox mode, MCP servers (`login`/`logout`), configured hooks |
+| `/agents`, `/plugin`, `/skills` | Custom agents, plugins, skills |
+| `/worktree` | Git worktrees: `new`, `switch`, `exit`, `remove`, `list` |
+| `/install-github` | Set up the GitHub Action |
+| `@path` | Attach a file, directory listing or image to your message; Tab completes paths |
+| Alt+V | Paste an image from the clipboard |
 | `!cmd` | Run a shell command yourself |
 | `#note` | Append a note to `./HUBBLE.md` |
 | Esc+Enter / Ctrl+J | New line |
@@ -207,7 +331,10 @@ After that:
 - `hubble --provider <name>` picks a provider for one run.
 - On first start with no API key at all, the same setup runs instead of an error.
 
-Extra providers are stored in `~/.hubble/providers.json`, with their API keys in plain text, like a `.env` file.
+Extra providers are stored in `~/.hubble/providers.json`. Their API keys go to your OS credential store
+(Windows Credential Manager, macOS Keychain, or Secret Service on Linux); only where no credential store
+exists (headless Linux, containers) are they written into that file in plain text. `/provider secure` moves
+keys saved by older versions into the credential store.
 Their model lists are stored in `~/.hubble/models/<name>.json`. When a model is rate limited or down, Hubble retries that request with a fallback that the current provider actually has, in this order: the fallback you picked with `/fallback`, then `fallback_model` if the provider has it, then the provider's fastest verified model, then `fallback_model` on the built-in hubble provider. Sub-agents use the same route. `/fallback off` disables it for a provider.
 
 ## Project memory
@@ -249,8 +376,9 @@ Project settings files (`.hubble/*.json`) come from the repository, so they are 
 - `permission_mode`, `allow_secret_files`, `additional_dirs`, `shell` and allow rules apply only after you trust the folder. The CLI asks once and remembers the answer in `~/.hubble/trusted_folders.json`.
 - Deny rules always apply.
 
-Credentials come from `HUBBLE_API_KEY` / `HUBBLE_BASE_URL` in the environment, `.env` in your project, or `~/.hubble/.env`.
-Only `AIHUB_*` keys are read from those files.
+Credentials come from `HUBBLE_API_KEY` / `HUBBLE_BASE_URL` (and optionally `HUBBLE_MODEL`) in the
+environment, `.env` in your project, or `~/.hubble/.env`. Only `HUBBLE_*` keys (and the older `AIHUB_*`
+names) are read from those files; nothing else in a `.env` is touched.
 
 Sessions are saved as JSONL in `~/.hubble/projects/<project>/`. Input history is in `~/.hubble/history`.
 
@@ -263,7 +391,13 @@ hubble/
   ui.py           rich rendering: streamed markdown, diffs, approval prompts
   agent.py        agent loop, compaction, task sub-agent
   provider.py     OpenAI-compatible SSE client, retries, tool-call assembly
-  tools.py        workspace tools, sandbox, checkpoints
+  tools.py        workspace tools, checkpoints
+  sandbox.py      OS-native command sandbox (Seatbelt / bubblewrap)
+  mcp.py          MCP client: stdio, Streamable HTTP, SSE; mcp_oauth.py: OAuth login
+  hooks.py        hook runner; subagents.py: custom agents; plugins.py: plugins
+  worktree.py     git worktrees; github.py: GitHub Actions integration
+  images.py       image attachments and clipboard paste; keystore.py: OS credential store
+  scanner.py      background model availability checks
   permissions.py  modes and allow/deny rules
   session.py      JSONL transcripts
   prompts.py      system prompt, personas, memory files
@@ -282,7 +416,8 @@ automatic check off entirely (`/models refresh` still works). The check is one t
 costs a little on paid APIs.
 
 Running `python test_models.py` does the same scan for the built-in provider from the command line.
-The last scan found 33 working models out of 295.
+The last scan found 50 working models out of 295. Models that were only rate limited or timed out during a
+check show as "unknown", not "unavailable", and one that worked last time stays listed.
 
 | Category | Models |
 |---|---|
