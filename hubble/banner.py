@@ -340,10 +340,13 @@ def _stamp_text(grid, row: int, col: int, text: Text):
 
 def home_info_lines(*, version: str, provider: str, model: str, mode: str, root: str, session_id: Optional[str],
                     memory_files: List[str], model_count: Optional[int], provider_count: int, resumable: int,
-                    show_provider: bool) -> Tuple[List[Text], List[Text]]:
+                    show_provider: bool, scan_note: str = "") -> Tuple[List[Text], List[Text]]:
     """(status lines, tip lines) as rich Text, shared by the static and animated home screens."""
     via = f"[dim]{escape(provider)}[/dim] · " if show_provider else ""
-    count = f" [dim]({model_count} models)[/dim]" if model_count else ""
+    if scan_note:
+        count = f" [dim]({escape(scan_note)})[/dim]"
+    else:
+        count = f" [dim]({model_count} models)[/dim]" if model_count else ""
     mode_color = {"default": "white", "accept-edits": "green", "plan": "blue", "yolo": "red"}.get(mode, "white")
     status = [f"[bold]model  [/bold]  {via}[#00d7ff]{escape(model)}[/#00d7ff]{count}",
               f"[bold]mode   [/bold]  [{mode_color}]{mode}[/{mode_color}] [dim](Shift+Tab to change)[/dim]",

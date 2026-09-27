@@ -90,6 +90,9 @@ class Repl:
         self.scanners: Dict[str, ModelScanner] = {}
         self._unannounced: set = set()
         self._quiet_scans: set = set()  # startup scans: say nothing unless they fail
+        self._scan_key = None           # last seen scanner progress, so redraws only rebuild on change
+        self._home_info_cache = None
+        self._home = None               # home screen (status, tips) while the first prompt is showing
         self.turn_stats = None
         self.agent = agent
         agent.fallback_resolver = self.fallback_for
@@ -228,7 +231,32 @@ class Repl:
                  f" (shift+tab) | persona: {a.persona} | context {ctx_pct}{pinned}"
                  + "".join(f" | {escape_html(n)}: {s.summary()}" for n, s in self.scanners.items() if s.running)
                  + " ")
+        self._sync_scan_visuals()
         return HTML(line1 + "\n" + self._stats_line())
+
+    def _sync_scan_visuals(self):
+        """Called on every prompt redraw (at least once a second): keep the home screen's model
+        line in step with the running scan, and report a finished scan right away instead of
+        waiting for the next Enter."""
+        key = tuple((n, s.status, s.done, s.retry_done) for n, s in self.scanners.items())
+        if key == self._scan_key:
+            return
+        finished = self._scan_key is not None and any(
+            n in self._unannounced and not s.running for n, s in self.scanners.items())
+        self._scan_key = key
+        if self._home is not None:
+            info = self._home_info_cache if not finished and self._home_info_cache else self._home_info()
+            self._home_info_cache = info
+            cur = self.scanners.get(self.agent.provider_name)
+            note = cur.summary() if cur and cur.running else ""
+            from hubble.banner import home_info_lines
+            self._home = home_info_lines(**info, scan_note=note)
+        if finished:
+            try:
+                from prompt_toolkit.application import get_app, run_in_terminal
+                get_app().loop.call_soon(lambda: run_in_terminal(self._announce_scans))
+            except Exception:
+                pass  # not inside a prompt; the main loop announces before the next one
 
     def _stats_line(self) -> str:
         a = self.agent

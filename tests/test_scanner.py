@@ -122,6 +122,50 @@ def test_spurious_401_is_retried_but_persistent_401_is_unavailable(tmp_path, mon
     assert always["available"] is False
 
 
+def test_summary_shows_retry_phase_progress():
+    s = ModelScanner(BASE, "key")
+    s.status, s.done, s.total, s.working = "running", 295, 295, 40
+    assert s.summary() == "scanning models 295/295 (40 ok)"
+    s.retry_total, s.retry_done = 58, 12
+    assert s.summary() == "rechecking busy models 12/58 (40 ok)"
+
+
+def test_home_screen_model_line_follows_scan(tmp_path, monkeypatch):
+    import hubble.repl as repl_mod
+    from hubble.agent import Agent
+    from hubble.banner import home_info_lines
+    from hubble.permissions import Permissions
+    from hubble.repl import Repl
+    from hubble.session import SessionStore
+    from hubble.tools import ToolContext
+    from hubble.ui import ReplEvents
+
+    monkeypatch.setattr(repl_mod, "provider_models", lambda name: [{"model": "m", "available": True}])
+    ctx = ToolContext(root=tmp_path)
+    settings = {"model": "m", "max_turns": 2, "max_tokens": 10, "context_window": 1000,
+                "auto_compact_ratio": 0, "persona": "code"}
+    agent = Agent(None, settings, ctx, Permissions(), ReplEvents(ctx))
+    agent.provider_name = "hubble"
+    repl = Repl(agent, SessionStore(tmp_path), {"hubble": object()})
+    repl._home = home_info_lines(**repl._home_info())
+
+    sc = ModelScanner(BASE, "key")
+    sc.status, sc.done, sc.total = "running", 10, 295
+    sc._thread = type("T", (), {"is_alive": lambda self: True})()
+    repl.scanners["hubble"] = sc
+    repl._sync_scan_visuals()
+    assert "scanning models 10/295" in repl._home[0][0].plain
+
+    sc.done = 20
+    repl._sync_scan_visuals()
+    assert "20/295" in repl._home[0][0].plain
+
+    sc.status, sc._thread = "done", None
+    repl._unannounced.add("hubble")
+    repl._sync_scan_visuals()
+    assert "(1 models)" in repl._home[0][0].plain
+
+
 def test_provider_models_shows_transient_as_unknown(tmp_path, monkeypatch):
     import hubble.providers as prov
     path = tmp_path / "p.json"

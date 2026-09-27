@@ -109,6 +109,8 @@ class ModelScanner:
         self.done = 0
         self.total = 0
         self.working = 0
+        self.retry_total = 0      # second phase: rate-limited/timed-out models re-probed one by one
+        self.retry_done = 0
         self.error = ""
         self._thread: Optional[threading.Thread] = None
 
@@ -120,13 +122,16 @@ class ModelScanner:
         if self.running:
             return False
         self.status, self.done, self.total, self.working, self.error = "running", 0, 0, 0, ""
+        self.retry_total = self.retry_done = 0
         self._thread = threading.Thread(target=self._run, name="hubble-model-scan", daemon=True)
         self._thread.start()
         return True
 
     def summary(self) -> str:
         if self.status == "running":
-            return f"scanning models {self.done}/{self.total or '?'}"
+            if self.retry_total:
+                return f"rechecking busy models {self.retry_done}/{self.retry_total} ({self.working} ok)"
+            return f"scanning models {self.done}/{self.total or '?'} ({self.working} ok)"
         if self.status == "done":
             return f"{self.working} models available"
         if self.status == "failed":
@@ -166,9 +171,11 @@ class ModelScanner:
                     pending = [i for i, r in enumerate(results) if r["transient"]]
                     if not pending:
                         break
+                    self.retry_total, self.retry_done = len(pending), 0
                     time.sleep(delay)
                     for i in pending:
                         r = _probe(client, self.base_url, headers, results[i]["model"], self.timeout)
+                        self.retry_done += 1
                         if r["available"]:
                             self.working += 1
                         results[i] = r
