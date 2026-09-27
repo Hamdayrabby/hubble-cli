@@ -142,8 +142,8 @@ def provider_models(name: str) -> List[Dict[str, Any]]:
         return []
     working = {m["model"]: m for m in data.get("working_models", []) if m.get("model")}
     checked = {r["model"] for r in data.get("all_results", []) if r.get("model")}
-    out = [{"model": m, "category": "Available", "latency_ms": w.get("latency_ms"), "available": True}
-           for m, w in working.items()]
+    out = [{"model": m, "category": "Available", "latency_ms": w.get("latency_ms"), "available": True,
+           "context_length": w.get("context_length")} for m, w in working.items()]
     for m in data.get("all_ids", []):
         if m not in working:
             out.append({"model": m, "category": "Unavailable" if m in checked else "Not checked",

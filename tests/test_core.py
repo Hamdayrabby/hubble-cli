@@ -566,3 +566,13 @@ def test_subagent_uses_parent_fallback_route(tmp_path):
     agent.fallback_resolver = lambda prov, model: (agent.provider, "qwen-fast") if prov == "hcnsec" else None
     assert agent.run("go") == "done"
     assert ("hcnsec", "qwen-fast") in tried and ("hcnsec", "codestral-latest") not in tried
+
+
+def test_context_length_extraction_openrouter_shape():
+    from hubble.scanner import _context_length
+    assert _context_length({"id": "x", "context_length": 1000000}) == 1000000
+    assert _context_length({"id": "x", "top_provider": {"context_length": 200000}}) == 200000
+    assert _context_length({"id": "x", "context_window": 32000}) == 32000  # alt field name some gateways use
+    assert _context_length({"id": "x"}) is None
+    assert _context_length({"id": "x", "context_length": 0}) is None  # 0/negative are not real values
+    assert _context_length({"id": "x", "context_length": "128000"}) is None  # not numeric: ignored, not crashed

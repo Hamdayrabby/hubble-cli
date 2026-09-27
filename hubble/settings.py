@@ -21,7 +21,8 @@ DEFAULTS: Dict[str, Any] = {
     "base_url": "https://aihub.071129.xyz/v1",
     "temperature": 0.3,
     "max_tokens": 8192,
-    "context_window": 128000,
+    "context_window": 128000,   # only a compaction-trigger estimate, not a hard cap the code enforces
+    "context_window_auto": True,  # use the model's real size when the provider publishes one (e.g. OpenRouter)
     "auto_compact_ratio": 0.8,
     "max_turns": 40,
     "permission_mode": "default",

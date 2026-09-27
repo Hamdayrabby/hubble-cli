@@ -582,6 +582,7 @@ class Repl:
         self.agent.settings["model"] = name
         if self.agent.session:
             self.agent.session.meta(model=name, provider=provider)
+        self._apply_known_context_window(provider, name)
         try:
             save_user_setting("model", name)
             save_user_setting("provider", provider)
@@ -590,6 +591,20 @@ class Repl:
             saved = ""
         prov = f"{escape(provider)}: " if len(self.providers) > 1 else ""
         console.print(f"[green]Model: {prov}{escape(name)}{saved}[/green]")
+
+    def _apply_known_context_window(self, provider: str, name: str):
+        """If the switched-to model publishes its real context size (most gateways don't;
+        OpenRouter and a few others do), use it instead of the generic default -- unless the
+        user has turned auto-detection off."""
+        if self.agent.settings.get("context_window_auto", True) is False:
+            return
+        known = next((m.get("context_length") for m in provider_models(provider) if m.get("model") == name), None)
+        if not known or known == self.agent.settings.get("context_window"):
+            return
+        old = self.agent.settings.get("context_window")
+        self.agent.settings["context_window"] = known
+        console.print(f"[dim]  context window: {old:,} -> {known:,} tokens (reported by the provider "
+                      "for this model; set context_window_auto: false to keep it fixed)[/dim]")
 
     def cmd_models(self, arg):
         name = self.agent.provider_name

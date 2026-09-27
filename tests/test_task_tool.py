@@ -133,3 +133,57 @@ def test_parallel_ok_excludes_edit_capable_batches(tmp_path):
     edit = call("task", {"description": "b", "prompt": "p", "capability": "edit"}, "c2")
     assert agent._parallel_ok([read_only, read_only.__class__("c3", "task", read_only.arguments)])
     assert not agent._parallel_ok([read_only, edit])
+
+
+def test_apply_known_context_window_on_model_switch(tmp_path, monkeypatch):
+    import hubble.repl as repl_mod
+    from hubble.permissions import Permissions
+    from hubble.repl import Repl
+    from hubble.session import SessionStore
+    from hubble.ui import ReplEvents
+
+    monkeypatch.setattr(repl_mod, "provider_models",
+                        lambda name: [{"model": "big-context-model", "context_length": 1000000},
+                                      {"model": "small-model", "context_length": 8000}])
+
+    def fake_save(key, value):
+        pass
+    monkeypatch.setattr(repl_mod, "save_user_setting", fake_save)
+
+    ctx = ToolContext(root=tmp_path)
+    settings = {**SETTINGS, "context_window": 128000}
+    agent = Agent(RecordingProvider([]), settings, ctx, Permissions(), ReplEvents(ctx))
+    agent.provider_name = "hubble"
+    repl = Repl(agent, SessionStore(tmp_path), {"hubble": object()})
+
+    repl._set_model("big-context-model")
+    assert agent.settings["context_window"] == 1000000
+
+    repl._set_model("small-model")
+    assert agent.settings["context_window"] == 8000
+
+    # A model the provider says nothing about keeps whatever was last known, rather than resetting.
+    monkeypatch.setattr(repl_mod, "provider_models", lambda name: [{"model": "unlisted-model"}])
+    repl._set_model("unlisted-model")
+    assert agent.settings["context_window"] == 8000
+
+
+def test_context_window_auto_can_be_disabled(tmp_path, monkeypatch):
+    import hubble.repl as repl_mod
+    from hubble.permissions import Permissions
+    from hubble.repl import Repl
+    from hubble.session import SessionStore
+    from hubble.ui import ReplEvents
+
+    monkeypatch.setattr(repl_mod, "provider_models",
+                        lambda name: [{"model": "big-context-model", "context_length": 1000000}])
+    monkeypatch.setattr(repl_mod, "save_user_setting", lambda key, value: None)
+
+    ctx = ToolContext(root=tmp_path)
+    settings = {**SETTINGS, "context_window": 128000, "context_window_auto": False}
+    agent = Agent(RecordingProvider([]), settings, ctx, Permissions(), ReplEvents(ctx))
+    agent.provider_name = "hubble"
+    repl = Repl(agent, SessionStore(tmp_path), {"hubble": object()})
+
+    repl._set_model("big-context-model")
+    assert agent.settings["context_window"] == 128000  # untouched: auto-detection was turned off

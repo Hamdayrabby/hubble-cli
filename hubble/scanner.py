@@ -23,6 +23,22 @@ def scan_age_hours(path: Path = SCAN_FILE) -> Optional[float]:
         return None
 
 
+def _context_length(entry: Dict[str, Any]) -> Optional[int]:
+    """Pull a model's context size out of a /models entry, if the gateway publishes one.
+    Field name varies by provider: OpenRouter uses top-level `context_length` (and repeats it
+    under `top_provider`); a few others use `context_window`. Most gateways publish neither."""
+    for key in ("context_length", "context_window"):
+        val = entry.get(key)
+        if isinstance(val, (int, float)) and val > 0:
+            return int(val)
+    top = entry.get("top_provider")
+    if isinstance(top, dict):
+        val = top.get("context_length")
+        if isinstance(val, (int, float)) and val > 0:
+            return int(val)
+    return None
+
+
 def _probe(client: httpx.Client, base_url: str, headers: Dict[str, str], model: str, timeout: float) -> Dict[str, Any]:
     payload = {"model": model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 10, "temperature": 0.1}
     start = time.time()
@@ -96,6 +112,10 @@ class ModelScanner:
                 data = resp.json()
                 entries = data.get("data", data) if isinstance(data, dict) else data
                 owners = {m["id"]: m.get("owned_by", "") for m in entries if isinstance(m, dict) and m.get("id")}
+                # Some gateways (OpenRouter and a few others) publish each model's real context
+                # size; most (including the default AIHub gateway) do not, so this is best-effort.
+                context_lengths = {m["id"]: _context_length(m) for m in entries
+                                   if isinstance(m, dict) and m.get("id")}
                 self.total = len(owners)
                 results: List[Dict[str, Any]] = []
 
@@ -124,7 +144,8 @@ class ModelScanner:
             "all_ids": list(owners),
             "working_count": len(working),
             "working_models": [{"model": r["model"], "latency_ms": r["latency_ms"],
-                                "owner": owners.get(r["model"], ""), "sample": r["sample"]} for r in working],
+                                "owner": owners.get(r["model"], ""), "sample": r["sample"],
+                                "context_length": context_lengths.get(r["model"])} for r in working],
             "all_results": results,
         }
         self.output.parent.mkdir(parents=True, exist_ok=True)
