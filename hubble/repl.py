@@ -103,6 +103,7 @@ class Repl:
         self.commands: Dict[str, Command] = {}
         self._register_builtin()
         self._load_custom_commands()
+        self._register_mcp_prompts()
 
     # ----- setup ---------------------------------------------------------
 
@@ -150,7 +151,7 @@ class Repl:
         r("thinking", self.cmd_thinking, "Show or hide the model's reasoning text", args="[on|off]")
         r("sandbox", self.cmd_sandbox, "Run shell commands in an isolated Docker container instead of "
           "directly on this machine", args="[on|off]")
-        r("mcp", self.cmd_mcp, "List configured MCP servers and their tools")
+        r("mcp", self.cmd_mcp, "List MCP servers; log in to or out of a remote one", args="[login|logout <server>]")
         r("hooks", self.cmd_hooks, "List configured hooks")
         r("config", self.cmd_config, "Show effective settings and allow/deny rules")
         r("export", self.cmd_export, "Export conversation to markdown", ("copy",), "[file]")
@@ -1096,21 +1097,85 @@ class Repl:
             console.print("[yellow]Sandbox: off[/yellow] [dim](shell commands run directly on this machine)[/dim]")
 
     def cmd_mcp(self, arg):
-        from hubble.mcp import MCPTool
-        by_server: Dict[str, List[str]] = {}
-        for t in self.agent.tools:
-            if isinstance(t, MCPTool):
-                by_server.setdefault(t.client.config.name, []).append(t.tool_name)
-        configured = (self.agent.settings.get("mcp_servers") or {}).keys()
-        if not configured:
-            console.print("[dim]No MCP servers configured. Add one to mcp_servers in settings.json.[/dim]")
+        from hubble import mcp
+        sub, _, rest = arg.partition(" ")
+        servers = self.agent.settings.get("mcp_servers") or {}
+        if sub in ("login", "auth", "logout"):
+            name = rest.strip()
+            if name not in servers or not servers[name].get("url"):
+                console.print(f"Usage: /mcp {sub} <server>  (a server with a 'url' in mcp_servers)")
+                return
+            from hubble.mcp_oauth import OAuthError, TokenStore
+            store = TokenStore()
+            if sub == "logout":
+                store.forget(name)
+                console.print(f"[green]Logged out of {escape(name)}.[/green]")
+                return
+            cfg = mcp.config_from(name, servers[name], self.agent.ctx.root)
+            www = (mcp.PENDING_LOGIN.get(name) or (None, ""))[1]
+            try:
+                store.login(cfg, www, notice=lambda m: console.print(f"[dim]{escape(m)}[/dim]"))
+            except (OAuthError, KeyboardInterrupt) as e:
+                console.print(f"[red]Login failed: {escape(str(e) or 'cancelled')}[/red]")
+                return
+            self._reconnect_mcp(name)
             return
-        for name in configured:
-            tools = by_server.get(name)
-            if tools:
-                console.print(f"  [green]{escape(name)}[/green]  {len(tools)} tool(s): {escape(', '.join(tools))}")
+        if not servers:
+            console.print("[dim]No MCP servers configured. Add one to mcp_servers in settings.json "
+                          '(local: {"command": [...]}, remote: {"url": "https://..."}).[/dim]')
+            return
+        clients = {c.config.name: c for c in mcp.mcp_clients(self.agent.tools)}
+        for name, entry in servers.items():
+            c = clients.get(name)
+            kind = "remote" if entry.get("url") else "local"
+            if c:
+                tools = [t.tool_name for t in self.agent.tools if isinstance(t, mcp.MCPTool) and t.client is c]
+                extra = f"; prompts: {', '.join(p['name'] for p in c.prompts)}" if c.prompts else ""
+                console.print(f"  [green]{escape(name)}[/green] [dim]({kind})[/dim]  {len(tools)} tool(s): "
+                              f"{escape(', '.join(tools))}{escape(extra)}")
+            elif name in mcp.PENDING_LOGIN:
+                console.print(f"  [yellow]{escape(name)}[/yellow] [dim]({kind})[/dim]  needs login: /mcp login {escape(name)}")
             else:
-                console.print(f"  [red]{escape(name)}[/red]  not connected")
+                console.print(f"  [red]{escape(name)}[/red] [dim]({kind})[/dim]  not connected")
+
+    def _reconnect_mcp(self, name: str):
+        from hubble import mcp
+        entry = (self.agent.settings.get("mcp_servers") or {}).get(name) or {}
+        client = mcp.connect(name, entry, self.agent.ctx.root, self.agent.events)
+        if client is None:
+            return
+        old = [t for t in self.agent.tools if isinstance(t, mcp.MCPTool) and t.client.config.name == name]
+        for c in {id(t.client): t.client for t in old}.values():
+            c.stop()
+        self.agent.tools = [t for t in self.agent.tools if t not in old] + mcp.tools_for(client)
+        self._register_mcp_prompts()
+        console.print(f"[green]MCP server '{escape(name)}' connected: {len(client.tools)} tool(s).[/green]")
+
+    def _register_mcp_prompts(self):
+        """Each MCP prompt becomes /mcp__<server>__<prompt> [args]; args are key=value pairs, or
+        plain text for a prompt's first argument."""
+        from hubble.mcp import mcp_clients
+        for client in mcp_clients(self.agent.tools):
+            for p in client.prompts:
+                name = f"mcp__{client.config.name}__{p['name']}".lower()
+                arg_names = [a.get("name") for a in p.get("arguments") or [] if a.get("name")]
+
+                def run(arg, client=client, prompt=p["name"], arg_names=arg_names):
+                    args: Dict[str, str] = {}
+                    pairs = re.findall(r'(\w+)=("[^"]*"|\S+)', arg)
+                    if pairs:
+                        args = {k: v.strip('"') for k, v in pairs}
+                    elif arg and arg_names:
+                        args = {arg_names[0]: arg}
+                    try:
+                        text = client.get_prompt(prompt, args)
+                    except Exception as e:
+                        console.print(f"[red]{escape(str(e))}[/red]")
+                        return
+                    self.send(text)
+                hint = " ".join(f"{a}=..." for a in arg_names) or "[args]"
+                self._register(name, run, f"(MCP prompt, {client.config.name}) {p.get('description') or p['name']}",
+                               args=hint)
 
     def cmd_hooks(self, arg):
         hooks = self.agent.settings.get("hooks") or {}
