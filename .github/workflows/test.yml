@@ -23,6 +23,8 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get install -y bubblewrap || true
       - run: pip install -e ".[dev]"
+      - name: Report native sandbox availability
+        run: python -c "from hubble.sandbox import native_kind; print('::notice::native sandbox on ${{ matrix.os }}:', native_kind())"
       - run: pytest -q -rs
 
   build:

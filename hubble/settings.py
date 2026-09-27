@@ -170,6 +170,8 @@ def load_settings(root: Path, overrides: Optional[Dict[str, Any]] = None,
 
     if not settings.get("api_key"):
         settings["api_key"] = env.get("HUBBLE_API_KEY") or env.get("AIHUB_API_KEY", "")
+    if (overrides is None or overrides.get("model") is None) and env.get("HUBBLE_MODEL"):
+        settings["model"] = env["HUBBLE_MODEL"]
     if overrides is None or overrides.get("base_url") is None:
         settings["base_url"] = env.get("HUBBLE_BASE_URL") or env.get("AIHUB_BASE_URL") or settings["base_url"]
     return settings

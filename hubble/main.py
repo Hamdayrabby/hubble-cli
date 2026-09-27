@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -38,6 +39,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--persona", choices=list(PERSONAS), help="system persona")
     p.add_argument("--output-format", choices=["text", "json", "stream-json"], default="text",
                    help="output format for -p (stream-json: one JSON event per line as it happens)")
+    p.add_argument("--github", action="store_true",
+                   help="with -p, inside GitHub Actions: build the prompt from the PR/issue event and post "
+                        "the answer as a comment (see /install-github)")
     p.add_argument("--image", action="append", default=[], metavar="FILE",
                    help="with -p: attach an image to the prompt (repeatable; needs a vision model)")
     p.add_argument("--max-turns", type=int, help="max model calls per prompt")
@@ -280,6 +284,22 @@ def run_headless(args, settings, provider, ctx, perms, store, prompt, fallback_c
     from hubble.agent import Agent
     from hubble.ui import HeadlessEvents, StreamJsonEvents
 
+    gh_task = None
+    if getattr(args, "github", False):
+        from hubble import github
+        try:
+            gh_task = github.build_task(*github.load_event())
+        except (github.GitHubError, ValueError) as e:
+            print(f"hubble: {e}", file=sys.stderr)
+            return 2
+        if gh_task is None:
+            print("hubble: nothing to do for this GitHub event (no @hubble mention, or not a PR/issue event)",
+                  file=sys.stderr)
+            return 0
+        prompt = gh_task["prompt"] + (f"\n\n{prompt}" if prompt.strip() else "")
+        if not gh_task["can_edit"]:
+            perms.deny += ["write_file", "edit_file"]  # reviews and issue answers never change files
+
     if not prompt.strip():
         print("hubble: -p needs a prompt (argument or stdin)", file=sys.stderr)
         return 2
@@ -330,6 +350,15 @@ def run_headless(args, settings, provider, ctx, perms, store, prompt, fallback_c
         events.emit({"type": "result", **summary})
     elif args.output_format == "json":
         print(json.dumps(summary, ensure_ascii=False, indent=2))
+    if gh_task is not None:
+        from hubble import github
+        repo = os.environ.get("GITHUB_REPOSITORY", "")
+        try:
+            url = github.post_comment(repo, gh_task["number"], github.format_reply(result, stats, agent.model, is_error))
+            print(f"hubble: posted {url}", file=sys.stderr)
+        except (github.GitHubError, OSError) as e:
+            print(f"hubble: {e}", file=sys.stderr)
+            return 1
     return 1 if is_error else 0
 
 

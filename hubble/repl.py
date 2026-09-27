@@ -158,6 +158,8 @@ class Repl:
         r("export", self.cmd_export, "Export conversation to markdown", ("copy",), "[file]")
         r("skills", self.cmd_skills, "List skills (the model can also call these on its own)")
         r("skill", self.cmd_skill_new, "Create a new skill template to fill in", args="new <name> [user]")
+        r("install-github", self.cmd_install_github, "Set up the GitHub Action: PR reviews and @hubble in comments",
+          ("github",), "[--force]")
         r("worktree", self.cmd_worktree, "Work in an isolated git worktree (new, switch, exit, remove, list)",
           ("worktrees", "wt"), "[new|switch|exit|remove <name>]")
         r("agents", self.cmd_agents, "List custom sub-agents, or create one", ("agent",), "[new <name> [user]]")
@@ -931,6 +933,23 @@ class Repl:
         for s in self.agent.skills:
             console.print(f"  [bold]/{s.name}[/bold] [dim]({s.scope})[/dim]  {escape(s.description)}")
         console.print("[dim]Run one with /<name>, or the model calls them on its own when relevant.[/dim]")
+
+    def cmd_install_github(self, arg):
+        from hubble.github import install_workflow
+        path = self.agent.ctx.root / ".github" / "workflows" / "hubble.yml"
+        if path.exists() and arg.strip() != "--force":
+            console.print(f"[yellow]{escape(str(path))} already exists.[/yellow] [dim]/install-github --force "
+                          "overwrites it.[/dim]")
+            return
+        install_workflow(self.agent.ctx.root)
+        console.print(f"[green]Wrote {escape(self.agent.ctx.rel(path))}.[/green]\n"
+                      "[dim]Next:\n"
+                      "  1. Add your API key as a repository secret named HUBBLE_API_KEY\n"
+                      "     (Settings → Secrets and variables → Actions), e.g. gh secret set HUBBLE_API_KEY\n"
+                      "  2. Optional repository variables: HUBBLE_MODEL, HUBBLE_BASE_URL\n"
+                      "  3. Commit and push the workflow.\n"
+                      "Then every PR gets a review, and \"@hubble <request>\" in a comment gets an answer "
+                      "(on a PR it can push fixes). Only owners, members and collaborators can trigger it.[/dim]")
 
     def cmd_worktree(self, arg):
         from hubble import worktree
