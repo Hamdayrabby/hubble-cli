@@ -187,3 +187,54 @@ def test_context_window_auto_can_be_disabled(tmp_path, monkeypatch):
 
     repl._set_model("big-context-model")
     assert agent.settings["context_window"] == 128000  # untouched: auto-detection was turned off
+
+
+def test_menu_space_survives_the_home_screen_prompt(tmp_path, monkeypatch):
+    """Regression test: PromptSession.prompt(**kwargs) permanently overwrites the session, not
+    just that call. The animated home screen's first prompt passes reserve_space_for_menu=0;
+    without resetting it afterward, every later prompt loses room for the "/" completion menu."""
+    import threading
+    import time
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.formatted_text import HTML
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from hubble.agent import Agent
+    from hubble.banner import home_info_lines
+    from hubble.permissions import Permissions
+    from hubble.repl import Repl
+    from hubble.session import SessionStore
+    from hubble.ui import ReplEvents
+
+    ctx = ToolContext(root=tmp_path)
+    agent = Agent(RecordingProvider([]), dict(SETTINGS), ctx, Permissions(), ReplEvents(ctx))
+    repl = Repl(agent, SessionStore(tmp_path))
+    repl._home = home_info_lines(version="4", provider="hubble", model="m", mode="default", root=str(tmp_path),
+                                 session_id=None, memory_files=[], model_count=None, provider_count=1,
+                                 resumable=0, show_provider=False)
+    repl._home_t0 = time.time()
+
+    with create_pipe_input() as inp:
+        def typer():
+            time.sleep(0.2)
+            inp.send_text("\r")            # first prompt: just press Enter (the home screen)
+            time.sleep(0.2)
+            inp.send_text("/exit\r")        # second prompt: exit cleanly once we've checked state
+        threading.Thread(target=typer, daemon=True).start()
+        with create_app_session(input=inp, output=DummyOutput()):
+            session = repl._prompt_session()
+            assert session.reserve_space_for_menu == 14  # the constructed default
+
+            first = session.prompt(repl._home_message, refresh_interval=1 / 30, reserve_space_for_menu=0)
+            assert first == ""
+            assert session.reserve_space_for_menu == 0  # confirms the underlying prompt_toolkit behavior
+
+            # This is the fix under test: repl.run()'s loop resets these right after the home prompt.
+            session.reserve_space_for_menu = 14
+            session.refresh_interval = 1.0
+            assert session.reserve_space_for_menu == 14
+
+            second = session.prompt(HTML("> "))
+    assert second == "/exit"

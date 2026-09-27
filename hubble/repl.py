@@ -385,6 +385,11 @@ class Repl:
                     # the last frame stays in the scrollback.
                     text = session.prompt(self._home_message, refresh_interval=1 / 30, reserve_space_for_menu=0)
                     self._home = None
+                    # PromptSession.prompt() kwargs overwrite the session permanently, not just for
+                    # that one call -- without resetting these, every later prompt keeps 0 reserved
+                    # menu space (so "/" never shows a dropdown again) and a needlessly fast redraw.
+                    session.reserve_space_for_menu = 14
+                    session.refresh_interval = 1.0
                 else:
                     text = session.prompt(HTML("<ansicyan><b>❯</b></ansicyan> "))
             except KeyboardInterrupt:
