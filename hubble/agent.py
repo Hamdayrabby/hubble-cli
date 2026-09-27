@@ -115,9 +115,21 @@ class Agent:
         # Shared with sub-agents so Ctrl+C stops every thread of a parallel batch.
         self.cancel = threading.Event()
         self.is_subagent = False
+        self.session_context = ""  # from SessionStart hooks; part of the system prompt
+        self._session_started = False
 
-    def shutdown(self):
-        """Stop any MCP server subprocesses this agent started. Call once, on exit."""
+    def start_session(self, source: str = "startup"):
+        """Run SessionStart hooks once. source: startup | resume | clear."""
+        self._session_started = True
+        res = self.hooks.run("SessionStart", {"source": source,
+                                              "session_id": self.session.id if self.session else None})
+        self.session_context = res.additional_context
+
+    def shutdown(self, reason: str = "exit"):
+        """Run SessionEnd hooks and stop any MCP server subprocesses. Call once, on exit."""
+        if self._session_started:
+            self.hooks.run("SessionEnd", {"reason": reason,
+                                          "session_id": self.session.id if self.session else None})
         from hubble.mcp import stop_mcp_clients
         stop_mcp_clients(self.tools)
 
@@ -137,9 +149,12 @@ class Agent:
                           + ("" if self.ctx.sandbox_network else "; it has no network access"))
         else:
             shell_label = shell_name(self.ctx.shell_argv)
-        return build_system_prompt(self.ctx.root, self.persona, shell_label, self.model,
-                                   self.pinned, self.memory, self.permissions.mode,
-                                   skills_prompt_block(self.skills))
+        prompt = build_system_prompt(self.ctx.root, self.persona, shell_label, self.model,
+                                     self.pinned, self.memory, self.permissions.mode,
+                                     skills_prompt_block(self.skills))
+        if self.session_context:
+            prompt += f"\n\n<session-start-context>\n{self.session_context}\n</session-start-context>"
+        return prompt
 
     def reload_skills(self):
         """Re-scan skill files and refresh the skill tool (called after write_skill saves one)."""
@@ -423,6 +438,8 @@ class Agent:
                 preview = tool.preview(args, self.ctx)
             except (ToolError, OSError) as e:
                 preview = f"(preview unavailable: {e})"
+            self.hooks.run("Notification", {"message": f"Hubble needs your permission to use {tool.name}",
+                                            "tool": tool.name, "target": target}, name=tool.name)
             answer, feedback = self.events.ask(tool, args, preview)
             if answer == "always":
                 rule = self.permissions.always_rule(tool.name, tool.kind, target)
@@ -451,6 +468,10 @@ class Agent:
 
     def compact(self, focus: str = "", mid_turn: bool = False) -> bool:
         if len(self.messages) < 3:
+            return False
+        pre = self.hooks.run("PreCompact", {"trigger": "auto" if mid_turn else "manual", "focus": focus})
+        if pre.decision == "block":
+            self.events.notice(f"Compaction blocked by hook: {pre.reason}", "warn")
             return False
         lines = []
         for m in self.messages:
@@ -604,7 +625,12 @@ class TaskTool(Tool):
                 raise ToolError(f"sub-agent failed: {sub.last_stats.error}")
             status = "done"
             detail = f"report ready ({len(report or ''):,} chars)" if report else "no report"
-            return report or "(sub-agent returned no report)"
+            report = report or "(sub-agent returned no report)"
+            stop = p.hooks.run("SubagentStop", {"description": label, "capability": "edit" if edit else "read_only",
+                                                "agent": args.get("agent"), "report": report}, name=label)
+            if stop.additional_context:
+                report += f"\n\n<hook-context>\n{stop.additional_context}\n</hook-context>"
+            return report
         finally:
             p.total_prompt_tokens += sub.total_prompt_tokens
             p.total_completion_tokens += sub.total_completion_tokens

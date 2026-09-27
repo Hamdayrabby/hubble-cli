@@ -281,6 +281,7 @@ def run_headless(args, settings, provider, ctx, perms, store, prompt, fallback_c
     if agent.session is None and not args.no_session:
         agent.session = store.new(agent.model)
 
+    agent.start_session("resume" if agent.messages else "startup")
     result = agent.run(prompt)
     agent.shutdown()
     stats = agent.last_stats

@@ -405,6 +405,7 @@ class Repl:
 
     def run(self, initial_prompt: Optional[str] = None):
         self._home = None
+        self.agent.start_session("resume" if self.agent.messages else "startup")
         self.banner()
         self._refresh_stale_scans()
         session = self._prompt_session()

@@ -16,7 +16,17 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-EVENTS = ("UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop")
+EVENTS = ("SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification",
+          "PreCompact", "SubagentStop", "Stop")
+# What each event can do beyond observing:
+#   SessionStart      additionalContext is added to the system prompt for the whole session
+#   UserPromptSubmit  block the prompt, or add context to it
+#   PreToolUse        block the tool call
+#   PostToolUse       add context to the tool result
+#   PreCompact        block automatic/manual compaction
+#   SubagentStop      add context to the sub-agent's report
+#   Stop              block = make the agent keep going, with `reason` as the next instruction
+#   SessionEnd, Notification: observe only (log, desktop notification, etc.)
 
 
 @dataclass
