@@ -9,6 +9,9 @@
 - More `/provider add` presets: DeepSeek, xAI, Together, Fireworks, Cerebras, NVIDIA, Moonshot,
   LM Studio, and a custom Anthropic-compatible URL.
 - Home screen: a retro arcade scene with the HUBBLE starship; logo back to block letters.
+- `python -m hubble --add-to-path` fixes "hubble is not recognized" after a pip install whose
+  Scripts folder is not on PATH (user PATH on Windows, shell profile elsewhere); Hubble also shows
+  a one-line tip when started that way. Tested on Python 3.13 and 3.14 too.
 
 ## 4.1.2
 

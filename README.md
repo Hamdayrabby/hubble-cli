@@ -12,6 +12,14 @@ pipx install hubble-cli
 ```
 (or `pip install --user hubble-cli`; the latest unreleased code: `pipx install git+https://github.com/Hamdayrabby/hubble-cli.git`)
 
+**"hubble is not recognized" after `pip install`?** pip put the command in a folder that isn't on your
+PATH (it warns: *"The script hubble.exe is installed in '...\Scripts' which is not on PATH"*). Either run
+it as `python -m hubble`, or fix it once with:
+```
+python -m hubble --add-to-path
+```
+then open a new terminal and run `hubble`. (pipx avoids this: `pipx ensurepath` sets PATH up for you.)
+
 Upgrade with `pipx upgrade hubble-cli` (or `pip install -U hubble-cli`). Hubble tells you when a new
 version is out — it checks PyPI at most once a day; set `"update_check": false` to turn that off.
 

@@ -56,6 +56,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-session", action="store_true", help="do not save this session")
     p.add_argument("--quiet", action="store_true", help="with -p: hide tool progress on stderr")
     p.add_argument("--test", metavar="MODEL", help="check that a model responds, then exit")
+    p.add_argument("--add-to-path", action="store_true",
+                   help="put the folder with the hubble command on your PATH (fixes 'hubble is not recognized')")
     p.add_argument("-v", "--version", action="version", version=f"hubble {__version__}")
     return p
 
@@ -68,6 +70,14 @@ def main(argv=None):
             except (AttributeError, ValueError):
                 pass
     args = build_parser().parse_args(argv)
+    if args.add_to_path:
+        from hubble.setup_path import add_to_path
+        sys.exit(add_to_path())
+    if not args.print_mode and sys.stdin.isatty():
+        from hubble.setup_path import path_hint
+        hint = path_hint()
+        if hint:
+            print(hint, file=sys.stderr)
     root = Path(args.cwd or ".").resolve()
     if not root.is_dir():
         sys.exit(f"hubble: workspace not found: {root}")
