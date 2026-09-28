@@ -2,6 +2,7 @@
 
 import json
 import sys
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from rich.console import Console
@@ -53,45 +54,93 @@ def render_diff(diff: str, max_lines: int = MAX_DIFF_LINES) -> Text:
 
 
 class _BlockPreview:
-    """The block still being written, redrawn by rich.live on each refresh (~12/s)."""
+    """The block still being written, redrawn by rich.live on each refresh (~30/s), revealed word
+    by word with a cursor."""
 
     def __init__(self, owner: "StreamingMarkdown"):
         self.owner = owner
 
     def __rich__(self):
-        text = self.owner.buf
+        text, typing = self.owner.visible()
         if not text.strip():
-            return Text("")
+            return Text("▌", style="#8787af") if typing else Text("")
         lines = text.splitlines()
         room = max(4, self.owner.console.height - 4)
         if len(lines) > room:
             # Taller than the screen: show the newest lines as plain text; the whole block is
             # printed properly formatted the moment it is complete.
-            return Text("\n".join(lines[-room:]))
-        return Markdown(text, code_theme="monokai")
+            return Text("\n".join(lines[-room:]) + (" ▌" if typing else ""))
+        return Markdown(text + (" ▌" if typing else ""), code_theme="monokai")
 
 
 class StreamingMarkdown:
-    """Renders markdown as it streams. Finished blocks are printed for good (formatted, never
-    redrawn); the block still being written shows live underneath them, so text appears as soon
-    as the model sends it instead of only when a paragraph or code block is complete."""
+    """Renders markdown as it streams, like a chat app typing it out.
+
+    Everything received goes into `buf`; the screen reveals it word by word at a steady pace,
+    speeding up whenever a big chunk arrives, so it stays within about half a second of the model.
+    Finished blocks are printed for good, formatted; the block still being typed shows live
+    underneath them.
+    """
+
+    MIN_CPS = 90          # at least ~18 words a second
+    CATCH_UP_S = 0.35     # speed = backlog / this: a big chunk is typed fast, easing off near the end
+    FINISH_S = 0.6        # at the end of a reply, spend at most this long typing out the rest
 
     def __init__(self, con: Console):
+        import threading
         self.console = con
         self.buf = ""
+        self.shown = 0.0      # characters of buf revealed so far
         self.printed_any = False
         self.live = None
+        self._last = 0.0
+        self._lock = threading.Lock()
+        self.animate = con.is_terminal
+
+    # ----- reveal -------------------------------------------------------------
+
+    def _advance(self):
+        now = time.time()
+        if not self.animate:
+            self.shown = len(self.buf)
+        else:
+            dt = min(now - self._last, 0.2) if self._last else 0.0
+            backlog = len(self.buf) - self.shown
+            if backlog > 0:
+                self.shown = min(len(self.buf), self.shown + max(self.MIN_CPS, backlog / self.CATCH_UP_S) * dt)
+        self._last = now
+
+    def _visible_end(self) -> int:
+        """End of the revealed text, snapped back to a word boundary (so whole words appear)."""
+        end = int(self.shown)
+        if end >= len(self.buf):
+            return len(self.buf)
+        space = max(self.buf.rfind(" ", 0, end + 1), self.buf.rfind("\n", 0, end + 1))
+        return space + 1 if space >= 0 and end - space < 40 else end
+
+    def visible(self):
+        with self._lock:
+            self._advance()
+            end = self._visible_end()
+            return self.buf[:end], end < len(self.buf)
+
+    # ----- feeding --------------------------------------------------------------
 
     def feed(self, delta: str):
-        self.buf += delta
-        cut = self._boundary()
+        with self._lock:
+            self.buf += delta
+            self._advance()
+            cut = self._boundary(self.buf[:self._visible_end()])
+            if cut:
+                chunk, self.buf = self.buf[:cut], self.buf[cut:]
+                self.shown = max(0.0, self.shown - cut)
         if cut:
-            chunk, self.buf = self.buf[:cut], self.buf[cut:]
             self._render(chunk)
         if self.live is None and self.buf.strip() and self.console.is_terminal:
             from rich.live import Live
             from hubble.spinner import Footed
-            self.live = Live(Footed(_BlockPreview(self)), console=self.console, refresh_per_second=12,
+            self._last = time.time()
+            self.live = Live(Footed(_BlockPreview(self)), console=self.console, refresh_per_second=30,
                              transient=True, vertical_overflow="crop")
             self.live.start()
 
@@ -103,14 +152,26 @@ class StreamingMarkdown:
                 self.live = None
 
     def flush(self):
+        # Let the typing finish (briefly) instead of the rest of the reply appearing at once.
+        if self.live is not None:
+            deadline = time.time() + self.FINISH_S
+            while time.time() < deadline:
+                with self._lock:
+                    self._advance()
+                    done = self.shown >= len(self.buf)
+                if done:
+                    break
+                time.sleep(1 / 30)
         self._stop_live()
         if self.buf.strip():
             self._render(self.buf)
         self.buf = ""
+        self.shown = 0.0
 
-    def _boundary(self) -> Optional[int]:
+    @staticmethod
+    def _boundary(text: str) -> Optional[int]:
         in_fence, pos, last = False, 0, None
-        for line in self.buf.splitlines(keepends=True):
+        for line in text.splitlines(keepends=True):
             if not line.endswith("\n"):
                 break
             pos += len(line)

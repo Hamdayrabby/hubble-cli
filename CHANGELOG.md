@@ -26,7 +26,7 @@
 - **Status stays at the bottom while the agent works:** model, mode, context %, tokens this turn
   and for the session, and tool calls now show under the spinner, the sub-agent board and streaming
   text (before, the bar only existed while you typed).
-- **Answers stream live** instead of appearing a paragraph at a time.
+- **Answers type out word by word**, like a chat app, with a cursor: text is revealed at a steady pace (at least ~18 words/s, faster when a big chunk arrives, never more than about half a second behind the model), instead of appearing a paragraph or a burst of lines at a time.
 - **Fallback never picks a model that can't use tools:** the model check now tests tool calling;
   chat-only deployments (e.g. a vLLM server without `--enable-auto-tool-choice`) and non-chat models
   (parse, embed, rerank, guard, …) are skipped; a model that fails with "tool choice requires …"
