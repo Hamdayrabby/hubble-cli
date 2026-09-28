@@ -89,9 +89,13 @@ class UpdateChecker:
         except OSError:
             pass
 
+    def has_notice(self) -> bool:
+        """Cheap, side-effect-free: is there a notice waiting to be shown? (Called on every redraw.)"""
+        return bool(self.latest) and not self.announced and is_newer(self.latest)
+
     def pending_notice(self) -> Optional[str]:
         """The notice text once, when a newer version is known and not yet shown."""
-        if self.announced or not self.latest or not is_newer(self.latest):
+        if not self.has_notice():
             return None
         self.announced = True
         return (f"Update available: hubble {__version__} → {self.latest}. "

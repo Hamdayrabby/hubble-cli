@@ -63,6 +63,54 @@ def test_disabled_by_setting_or_env(monkeypatch, tmp_path):
     assert c.pending_notice() is None
 
 
+def _idle_redraws(tmp_path, latest, seconds=2.0):
+    """Sit at a real prompt for `seconds` with `latest` known; return how many times it redrew."""
+    import threading
+
+    from prompt_toolkit.application import create_app_session, get_app
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from hubble.agent import Agent
+    from hubble.permissions import Permissions
+    from hubble.repl import Repl
+    from hubble.session import SessionStore
+    from hubble.tools import ToolContext
+    from hubble.ui import ReplEvents
+
+    ctx = ToolContext(root=tmp_path)
+    agent = Agent(None, {"model": "m", "max_turns": 2, "max_tokens": 10, "context_window": 1000,
+                         "auto_compact_ratio": 0, "persona": "code"}, ctx, Permissions(), ReplEvents(ctx))
+    repl = Repl(agent, SessionStore(tmp_path), {"hubble": object()})
+    repl.updates.latest = latest
+    counts = {}
+    with create_pipe_input() as inp:
+        with create_app_session(input=inp, output=DummyOutput()):
+            session = repl._prompt_session()
+
+            def driver():
+                time.sleep(seconds)
+                counts["renders"] = session.app.render_counter
+                inp.send_text("\r")
+            threading.Thread(target=driver, daemon=True).start()
+            session.prompt("> ")
+    return counts["renders"], repl
+
+
+def test_no_redraw_loop_when_pypi_is_not_newer(tmp_path, monkeypatch):
+    """Regression: a known-but-not-newer version made every redraw schedule another redraw
+    (run_in_terminal), so the terminal flickered nonstop."""
+    renders, repl = _idle_redraws(tmp_path, latest="0.0.1")
+    assert renders < 15, f"{renders} redraws in 2s while idle: redraw loop"
+    assert repl.updates.pending_notice() is None
+
+
+def test_newer_version_announced_once_without_redraw_loop(tmp_path):
+    renders, repl = _idle_redraws(tmp_path, latest="999.0.0")
+    assert renders < 15, f"{renders} redraws in 2s while idle: redraw loop"
+    assert repl.updates.announced
+
+
 def test_network_failure_is_silent(monkeypatch, tmp_path):
     monkeypatch.setattr(update, "CACHE_FILE", tmp_path / "c.json")
     monkeypatch.setattr(update, "_fetch_latest", lambda timeout=4.0: None)

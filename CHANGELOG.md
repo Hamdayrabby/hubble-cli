@@ -1,5 +1,10 @@
 # Changelog
 
+## 4.1.1
+
+- Fix constant screen flicker in the REPL: when PyPI reported a version that was not newer than the
+  installed one, the new-version check scheduled a redraw on every redraw (hundreds per second).
+
 ## 4.1.0
 
 **Safety**

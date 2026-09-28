@@ -98,6 +98,7 @@ class Repl:
         self._main_root: Optional[Path] = None  # set once /worktree moves the tools elsewhere
         from hubble.update import UpdateChecker
         self.updates = UpdateChecker(enabled=bool(agent.settings.get("update_check", True)))
+        self._update_scheduled = False
         self.turn_stats = None
         self.agent = agent
         agent.fallback_resolver = self.fallback_for
@@ -263,12 +264,15 @@ class Repl:
         """Called on every prompt redraw (at least once a second): keep the home screen's model
         line in step with the running scan, and report a finished scan right away instead of
         waiting for the next Enter."""
-        if self.updates.latest and not self.updates.announced:
+        # Only when there really is something to print, and only schedule it once: run_in_terminal
+        # redraws the prompt, which calls this again -- anything looser here loops forever (flicker).
+        if self.updates.has_notice() and not self._update_scheduled:
+            self._update_scheduled = True
             try:
                 from prompt_toolkit.application import get_app, run_in_terminal
                 get_app().loop.call_soon(lambda: run_in_terminal(self._announce_update))
             except Exception:
-                pass  # not inside a prompt; the main loop shows it before the next one
+                self._update_scheduled = False  # not inside a prompt; the main loop shows it
         key = tuple((n, s.status, s.done, s.retry_done) for n, s in self.scanners.items())
         if key == self._scan_key:
             return
