@@ -444,17 +444,17 @@ def compose_grid(width: int, height: int, t: float, status: List[Text], tips: Li
     logo_h = {2: 9, 1: 7, 0: 1}  # letter rows + shadow row + tagline
     top = 2 if width >= BIG_LOGO_WIDTH + 4 else (1 if width >= 58 else 0)
     mid = min(top, 1)
-    # Richest to poorest. Below a plain small-logo layout, keep shrinking the status block itself
-    # (never just tips) so something animated always fits, all the way down to the logo line alone.
+    # Richest to poorest. The name is the last thing to shrink: first drop the scene, then the
+    # tips, then status lines, and only then fall back to a smaller logo.
     n_status = len(status)
-    layouts = [
-        (top, FULL, True, n_status), (top, COMPACT, True, n_status),
-        (mid, FULL, True, n_status), (mid, COMPACT, True, n_status),
-        (top, COMPACT, False, n_status), (mid, COMPACT, False, n_status), (0, COMPACT, False, n_status),
-        (top, None, True, n_status), (0, None, True, n_status), (0, None, False, n_status),
-        (0, None, False, min(2, n_status)), (0, None, False, min(1, n_status)),
-        (0, None, False, 0),
-    ]
+    layouts = []
+    for cand_size in dict.fromkeys([top, mid, 0]):
+        for cand_art in (FULL, COMPACT, None):
+            layouts.append((cand_size, cand_art, True, n_status))
+        for cand_art in (COMPACT, None):
+            layouts.append((cand_size, cand_art, False, n_status))
+        for n in (min(2, n_status), min(1, n_status), 0):
+            layouts.append((cand_size, None, False, n))
     size, art, with_tips, n_status = layouts[-1]
     for cand_size, cand_art, cand_tips, cand_n in layouts:
         if cand_art is not None and width < cand_art.width + 24:
