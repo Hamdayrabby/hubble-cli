@@ -1,5 +1,10 @@
 # Changelog
 
+## 4.1.2
+
+- The big HUBBLE logo now stays big in shorter terminals (e.g. a 20-row VS Code panel): the
+  telescope scene, tips and status lines give way first, and the logo shrinks only as a last resort.
+
 ## 4.1.1
 
 - Fix constant screen flicker in the REPL: when PyPI reported a version that was not newer than the
