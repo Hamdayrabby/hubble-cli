@@ -8,6 +8,10 @@
 - **`/route`:** cost/quality routing. Easy prompts go to a fast model, hard ones to a strong model,
   research sub-agents to fast, and a fast task that struggles escalates to strong. `/route auto`
   picks the fast model from your own stats.
+- **Sub-agent model team:** `/team add <provider:model> [what it is for]` builds a list the main model
+  picks from per sub-agent, with each model's recent record from `/stats`. Sub-agents (and custom
+  agent files) can now run on any configured provider (`provider:model`), several at once in
+  parallel, each labelled with its model.
 
 ## 4.2.0
 

@@ -141,6 +141,8 @@ class Repl:
         r("persona", self.cmd_persona, f"System persona: {', '.join(PERSONAS)}", args="[name]")
         r("resume", self.cmd_resume, "Resume a previous session of this project", ("sessions",), "[id|#]")
         r("cost", self.cmd_cost, "Token usage and context size of this session", ("tokens", "status"))
+        r("team", self.cmd_team, "Choose the models sub-agents can use (the main model picks one per task)",
+          args="[add <provider:model> [use] | remove <#> | clear]")
         r("stats", self.cmd_stats, "Which models finish your tasks, how fast, at what cost", args="[days]")
         r("route", self.cmd_route, "Route easy prompts to a fast model and hard ones to a strong model",
           ("routing",), "[fast <model> | strong <model> | auto | off | on]")
@@ -1074,6 +1076,61 @@ class Repl:
         if self.agent.last_route:
             tier, prov, model, reasons = self.agent.last_route
             console.print(f"[dim]Last prompt → {tier} ({escape(model)}): {escape('; '.join(reasons))}[/dim]")
+
+    def cmd_team(self, arg):
+        """The models sub-agents can use; the main model sees this list and picks per task."""
+        from hubble.router import parse_spec
+        s = self.agent.settings
+        team = [e if isinstance(e, dict) else {"model": str(e), "use": ""} for e in (s.get("subagent_models") or [])]
+        parts = arg.split(maxsplit=2)
+        sub = parts[0].lower() if parts else ""
+
+        def save():
+            s["subagent_models"] = team
+            save_user_setting("subagent_models", team)
+
+        if sub == "add" and len(parts) >= 2:
+            prov, model = parse_spec(parts[1], self.agent.provider_name)
+            if prov not in self.providers:
+                console.print(f"[red]Unknown provider '{escape(prov)}'. Use provider:model, e.g. aihub:codestral-latest[/red]")
+                return
+            spec = f"{prov}:{model}"
+            team = [e for e in team if e["model"] != spec] + [{"model": spec, "use": parts[2] if len(parts) > 2 else ""}]
+            save()
+        elif sub in ("remove", "rm") and len(parts) >= 2:
+            key = parts[1]
+            before = len(team)
+            if key.isdigit() and 1 <= int(key) <= len(team):
+                team.pop(int(key) - 1)
+            else:
+                prov, model = parse_spec(key, self.agent.provider_name)
+                team = [e for e in team if e["model"] not in (key, f"{prov}:{model}")]
+            if len(team) == before:
+                console.print(f"[yellow]No team member {escape(key)}.[/yellow]")
+                return
+            save()
+        elif sub == "clear":
+            team = []
+            save()
+        elif sub:
+            console.print("Usage: /team [add <provider:model> [what it is good for] | remove <#|model> | clear]")
+            return
+        if not team:
+            console.print("[dim]No sub-agent team yet: sub-agents use your current model (or the fast routing tier "
+                          "for research). Add models with, e.g.:\n"
+                          "  /team add aihub:ministral-8b-latest fast, for searching and reading lots of files\n"
+                          "  /team add anthropic:claude-opus-5 careful, for tricky changes and code review[/dim]")
+            return
+        from hubble.agent import team_block
+        console.print("[bold]Sub-agent model team[/bold]")
+        for i, e in enumerate(team, 1):
+            console.print(f"  {i}. [bold #00d7ff]{escape(e['model'])}[/bold #00d7ff]"
+                          + (f"  [dim]{escape(e['use'])}[/dim]" if e.get("use") else ""))
+        console.print("[dim]The main model picks from this list for each sub-agent, by what the part of the job "
+                      "needs; say so in your prompt to steer it (\"use the fast model to search, opus to review\"). "
+                      "Each sub-agent's model shows next to it while it runs. /stats shows how each one did.[/dim]")
+        if "[" in team_block(s):
+            console.print("[dim]Their recent record (from /stats) is shown to the main model too.[/dim]")
 
     def cmd_install_github(self, arg):
         from hubble.github import install_workflow

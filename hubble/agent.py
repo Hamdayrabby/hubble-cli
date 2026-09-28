@@ -712,7 +712,8 @@ class TaskTool(Tool):
             "prompt": {"type": "string", "description": "Detailed, self-contained instructions for the sub-agent"},
             "capability": {"type": "string", "enum": ["read_only", "edit"],
                            "description": "read_only (default) or edit"},
-            "model": {"type": "string", "description": "Model for this sub-agent (default: same as you)"},
+            "model": {"type": "string", "description": "Model for this sub-agent, 'model' or 'provider:model' "
+                                                          "(default: same as you). Pick from the team below."},
             "isolation": {"type": "string", "enum": ["none", "worktree"],
                           "description": "edit only. worktree: work in a fresh git worktree on its own branch, "
                                          "so the main checkout is untouched until you review and merge"},
@@ -725,12 +726,14 @@ class TaskTool(Tool):
 
     @property
     def description(self):
+        text = self.BASE_DESCRIPTION
         defs = self._defs()
-        if not defs:
-            return self.BASE_DESCRIPTION
-        lines = "\n".join(f"- {a.name}: {a.description}" for a in defs.values())
-        return (self.BASE_DESCRIPTION + "\nNamed specialist agents (pass `agent`; their capability, tools "
-                "and model come from their definition):\n" + lines)
+        if defs:
+            lines = "\n".join(f"- {a.name}: {a.description}" for a in defs.values())
+            text += ("\nNamed specialist agents (pass `agent`; their capability, tools and model come from "
+                     "their definition):\n" + lines)
+        team = team_block(getattr(self.parent, "settings", None) or {})
+        return text + ("\n" + team if team else "")
 
     def target(self, args):
         return args.get("description", "")
@@ -794,26 +797,35 @@ class TaskTool(Tool):
         label = args.get("description") or (spec.name if spec else "task")
         if spec:
             label = f"{spec.name}: {label}"
+        # Model, in order: the one this call asks for, the agent definition's, the fast routing tier
+        # for research, else the parent's own. Any of them may be "provider:model".
+        from hubble.router import parse_spec, routing_config
+        choice = args.get("model") or (spec.model if spec else "")
+        if not choice and not edit:
+            cfg = routing_config(p.settings)
+            choice = cfg["fast"] if cfg else ""
+        prov, model = parse_spec(choice, p.provider_name) if choice else (p.provider_name, p.model)
+        client = p.provider if prov == p.provider_name else (p.client_for(prov) if p.client_for else None)
+        note = ""
+        if client is None:
+            note = f" (provider '{prov}' is not configured; used {p.model})"
+            prov, model, client = p.provider_name, p.model, p.provider
+        if (prov, model) != (p.provider_name, p.model):
+            label = f"{label} · {model}"
         key = f"task-{next(_task_ids)}"
         p.events.subagent_start(key, label)
-        model = args.get("model") or (spec.model if spec else "") or p.model
-        sub = Agent(p.provider, {**p.settings, "model": model, "max_turns": 30 if edit else 20,
-                                "auto_compact_ratio": 0},
+        sub = Agent(client, {**p.settings, "model": model, "max_turns": 30 if edit else 20,
+                             "auto_compact_ratio": 0},
                     sub_ctx, perms, _SubagentEvents(p.events, label, key), tools=tools, system_override=system)
         sub.cancel = p.cancel
         sub.is_subagent = True
-        # Same provider and fallback route as the parent (it may have switched provider mid-session).
-        sub.provider_name = p.provider_name
+        sub.provider_name = prov
         sub.fallback_client = p.fallback_client
         sub.fallback_resolver = p.fallback_resolver
         sub.stats_log = p.stats_log
         sub.client_for = p.client_for
-        # Routing: research sub-agents (read_only, no model chosen) run on the fast tier.
-        from hubble.router import routing_config
-        cfg = routing_config(p.settings)
-        if cfg and not edit and not args.get("model") and not (spec and spec.model):
-            if sub._switch(cfg["fast"]):
-                sub.settings["model"] = sub.model
+        if note:
+            p.events.notice(f"  ↳ {label}{note}", "warn")
         status, detail = "failed", "crashed"
         try:
             report = sub.run(args["prompt"])
@@ -873,3 +885,42 @@ def describe_call(tool: Tool, args: Dict[str, Any]) -> str:
         return f"{args.get('path')} (from line {args.get('offset') or 1})"
     target = tool.target(args)
     return target or json.dumps(args)[:80]
+
+
+_TEAM_CACHE: Dict[str, Any] = {"at": 0.0, "key": None, "text": ""}
+
+
+def team_block(settings: Dict[str, Any]) -> str:
+    """The user's sub-agent model team for the task tool description: each model, what it is for,
+    and how it has actually done (from /stats), so the main model can match model to job."""
+    team = settings.get("subagent_models") or []
+    if not team:
+        return ""
+    key = json.dumps(team, sort_keys=True)
+    if _TEAM_CACHE["key"] == key and time.time() - _TEAM_CACHE["at"] < 60:
+        return _TEAM_CACHE["text"]
+    from hubble import stats
+    try:
+        rows = {(r["provider"], r["model"]): r for r in stats.summarize(stats.load(days=30))}
+    except Exception:
+        rows = {}
+    lines = []
+    for entry in team:
+        spec, use = (entry.get("model", ""), entry.get("use", "")) if isinstance(entry, dict) else (str(entry), "")
+        if not spec:
+            continue
+        from hubble.router import parse_spec
+        prov, model = parse_spec(spec, settings.get("provider") or "")
+        r = rows.get((prov, model))
+        perf = ""
+        if r and r["calls"]:
+            bits = [f"{r['call_success']:.0%} of {r['calls']} calls ok"]
+            if r["tok_per_s"]:
+                bits.append(f"{r['tok_per_s']:.0f} tok/s")
+            perf = f" [{', '.join(bits)}]"
+        lines.append(f"- {spec}" + (f": {use}" if use else "") + perf)
+    text = ("Model team for sub-agents (set `model` to one of these; match the model to the job, e.g. a fast "
+            "one for broad searching and a strong one for tricky changes or review; for a multi-part goal, "
+            "give each task the model that suits its part):\n" + "\n".join(lines)) if lines else ""
+    _TEAM_CACHE.update(at=time.time(), key=key, text=text)
+    return text

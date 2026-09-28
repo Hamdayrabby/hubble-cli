@@ -229,6 +229,21 @@ Everything is recorded locally in `~/.hubble/stats.jsonl`; `"stats": false` turn
   the rest of that task moves to strong, automatically.
 - Tiers can be on different providers (`provider:model`). `/stats` marks tasks that escalated with ↑.
 
+## A team of models for sub-agents
+
+One goal can be split across several sub-agents, each on a different model, even on different
+providers. Pick the team once:
+```
+/team add aihub:ministral-8b-latest fast, for searching and reading lots of files
+/team add groq:llama-3.3-70b-versatile quick second opinion
+/team add anthropic:claude-opus-5 careful, for tricky changes and code review
+```
+The main model sees this list (with each model's recent success rate and speed from `/stats`) and gives
+each `task` the model that suits its part: several research sub-agents on fast models in parallel, a
+strong one for the risky change or the final review. Steer it in plain words ("search with the fast
+model, review with opus"). Each running sub-agent shows its model next to its name. A `task` can also
+name any `provider:model` directly, and a custom agent file can pin one (`model: anthropic:claude-opus-5`).
+
 ## Custom agents
 
 Named specialists the model can delegate to with the `task` tool. One Markdown file each, in
