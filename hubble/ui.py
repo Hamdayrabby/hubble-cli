@@ -90,7 +90,8 @@ class StreamingMarkdown:
             self._render(chunk)
         if self.live is None and self.buf.strip() and self.console.is_terminal:
             from rich.live import Live
-            self.live = Live(_BlockPreview(self), console=self.console, refresh_per_second=12,
+            from hubble.spinner import Footed
+            self.live = Live(Footed(_BlockPreview(self)), console=self.console, refresh_per_second=12,
                              transient=True, vertical_overflow="crop")
             self.live.start()
 
@@ -198,8 +199,9 @@ class ReplEvents(Events):
         if self.board is None:
             from rich.live import Live
             self._stop_status(force=True)
+            from hubble.spinner import Footed
             self.board = SubagentBoard()
-            self.board_live = Live(self.board, console=console, refresh_per_second=12, transient=True)
+            self.board_live = Live(Footed(self.board), console=console, refresh_per_second=12, transient=True)
             self.board_live.start()
         self.board.add(key, label)
 

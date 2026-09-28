@@ -23,6 +23,14 @@
   commands reset this, so read → fix → re-test is fine), or, for a sub-agent, when it has used
   `subagent_token_budget` tokens (default 2M). `max_turns` (100) and `subagent_max_turns` (150) are
   only backstops. Long sub-agent runs now compact their history like the main agent.
+- **Status stays at the bottom while the agent works:** model, mode, context %, tokens this turn
+  and for the session, and tool calls now show under the spinner, the sub-agent board and streaming
+  text (before, the bar only existed while you typed).
+- **Answers stream live** instead of appearing a paragraph at a time.
+- **Fallback never picks a model that can't use tools:** the model check now tests tool calling;
+  chat-only deployments (e.g. a vLLM server without `--enable-auto-tool-choice`) and non-chat models
+  (parse, embed, rerank, guard, …) are skipped; a model that fails with "tool choice requires …"
+  mid-run is remembered and the next fallback is tried. The picker marks such models "no tools".
 - **Sub-agents always report:** a sub-agent that has to stop is asked for a final report from what it
   found instead of returning nothing (or, if the model still won't write one, the list of what it
   read). Such runs show as ◐ partial, not ✔.

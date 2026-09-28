@@ -295,6 +295,35 @@ class Repl:
         self._toolbar_height = 2 + len(lines)  # rule + status lines + stats line
         return HTML(rule + "".join("\n  " + line for line in lines) + "\n  " + self._stats_line())
 
+    def _run_footer(self):
+        """One dim status line pinned under the live display while the agent works."""
+        from rich.text import Text
+        a = self.agent
+        s = a.last_stats
+        mode = a.permissions.mode
+        mode_style = {"accept-edits": "bold #5fd787", "plan": "bold #5fafff", "yolo": "bold #ff5f5f"}.get(mode, "#b8b8cc")
+        ratio = a.context_ratio()
+
+        def short(n: int) -> str:
+            return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.1f}k" if n >= 1e4 else f"{n:,}"
+
+        t = Text("  ")
+        if len(self.providers) > 1:
+            t.append(f"{a.provider_name} ", style="#6c6c80")
+        t.append(a.model, style="bold #00d7ff")
+        sep = ("  ·  ", "#44445a")
+        t.append(*sep).append(mode, style=mode_style)
+        t.append(*sep).append("context ", style="#6c6c80").append(
+            f"{ratio:.0%}", style="bold #ffaf00" if ratio >= 0.8 else "#b8b8cc")
+        t.append(*sep).append(f"↑ {short(s.prompt_tokens)}", style="#87afd7").append(" ", style="")
+        t.append(f"↓ {short(s.completion_tokens)}", style="#af87d7").append(" this turn", style="#6c6c80")
+        if s.tool_calls:
+            t.append(*sep).append(str(s.tool_calls), style="#b8b8cc").append(
+                f" tool call{'s' if s.tool_calls != 1 else ''}", style="#6c6c80")
+        t.append(*sep).append("session ", style="#6c6c80").append(
+            short(a.total_prompt_tokens + a.total_completion_tokens), style="#b8b8cc")
+        return t
+
     @classmethod
     def _pack(cls, parts: List[str], width: int) -> List[str]:
         def visible(markup: str) -> int:
@@ -514,6 +543,8 @@ class Repl:
                 self.start_scan(name, "", quiet=True)
 
     def run(self, initial_prompt: Optional[str] = None):
+        from hubble import spinner
+        spinner.FOOTER = self._run_footer  # status line under the spinner/board/stream while working
         self._home = None
         self.agent.start_session("resume" if self.agent.messages else "startup")
         self.banner()
@@ -553,6 +584,7 @@ class Repl:
                     break
             except KeyboardInterrupt:
                 console.print("[yellow]Interrupted.[/yellow]")
+        spinner.FOOTER = None
         self.agent.shutdown()
         console.print("[dim]Bye.[/dim]")
 
@@ -745,6 +777,8 @@ class Repl:
                 else:
                     lat = f"{m['latency_ms']} ms" if m.get("latency_ms") else "-"
                     meta = f"{lat:>8} · {m['category']}"
+                if m.get("tools") is False:
+                    meta += " · no tools (chat only)"
                 items.append(((pname, m["model"]), m["model"], (f"{pname} · " if multi else "") + meta))
         return items
 

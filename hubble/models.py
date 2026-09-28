@@ -96,13 +96,14 @@ def all_models() -> List[Dict[str, Any]]:
                         "latency_ms": scanned.get(name, {}).get("latency_ms"),
                         "available": _availability(name, scanned, unknown, have_scan),
                         "note": unknown.get(name, ""),
-                        "context_length": scanned.get(name, {}).get("context_length")})
+                        "context_length": scanned.get(name, {}).get("context_length"),
+                        "tools": scanned.get(name, {}).get("tools")})
             seen.add(name)
     for name, info in scanned.items():
         if name not in seen:
             out.append({"model": name, "category": "Other Verified",
                         "latency_ms": info.get("latency_ms"), "available": True,
-                        "context_length": info.get("context_length")})
+                        "context_length": info.get("context_length"), "tools": info.get("tools")})
     return out
 
 

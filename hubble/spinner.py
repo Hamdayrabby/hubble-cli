@@ -57,6 +57,34 @@ class Shimmer:
         return out
 
 
+# Set by the REPL: returns a one-line status (model, context, tokens) or None. Every live display
+# during a run (spinner, sub-agent board, streaming text) draws it underneath itself, so the
+# status stays pinned at the bottom while the agent works, not just while you type.
+FOOTER = None
+
+
+class Footed:
+    """Wraps a live renderable and adds the status footer below it."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    def __getattr__(self, name):  # keep e.g. .shimmer.tokens working on the wrapped object
+        return getattr(self.inner, name)
+
+    def __rich__(self):
+        footer = None
+        if FOOTER is not None:
+            try:
+                footer = FOOTER()
+            except Exception:
+                footer = None
+        if footer is None:
+            return self.inner
+        from rich.console import Group
+        return Group(self.inner, Text(""), footer)
+
+
 def start_shimmer(console, label: Optional[str] = None) -> "ShimmerLive":
     live = ShimmerLive(Shimmer(label), console)
     live.start()
@@ -68,7 +96,7 @@ class ShimmerLive:
 
     def __init__(self, shimmer: Shimmer, console):
         self.shimmer = shimmer
-        self.live = Live(shimmer, console=console, refresh_per_second=15, transient=True)
+        self.live = Live(Footed(shimmer), console=console, refresh_per_second=15, transient=True)
 
     def start(self):
         self.live.start()

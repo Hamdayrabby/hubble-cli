@@ -488,6 +488,8 @@ class Agent:
                 "re-running the same task.)")
 
     def _stream_with_fallback(self, schemas) -> TurnResult:
+        from hubble.providers import NO_TOOLS
+        from hubble.scanner import tools_unsupported
         messages = [{"role": "system", "content": self.system_prompt()}] + self.messages
         kwargs = dict(tools=schemas, temperature=self.temperature,
                       max_tokens=int(self.settings.get("max_tokens", 8192)),
@@ -499,21 +501,31 @@ class Agent:
         except ProviderError as e:
             self.stats_log.call(self.provider_name, self.model, False, status=e.status, error=str(e),
                                 duration=time.time() - started, subagent=self.is_subagent)
-            if not e.transient or self._partial_text:
+            no_tools = tools_unsupported(str(e))
+            if no_tools:
+                NO_TOOLS.add((self.provider_name, self.model))  # never pick it as a fallback again
+            if not (e.transient or no_tools) or self._partial_text:
                 raise
+            last_error, failed_model = e, self.model
+        tried = {(self.provider_name, self.model)}
+        for _ in range(3):  # the first fallback, plus the next ones if they turn out tool-less
             if self.fallback_resolver is not None:
                 target = self.fallback_resolver(self.provider_name, self.model)
             else:
                 fb = self.settings.get("fallback_model")
                 target = (self.fallback_client, fb) if fb and self.fallback_client else None
             if not target or target == (self.provider, self.model):
-                raise
+                raise last_error
             client, fallback = target
-            where = "" if client is self.provider else " on another provider"
-            self.events.notice(f"{self.model} failed ({e}). Using fallback model {fallback}{where} for this "
-                               "request; /model to switch, /fallback to choose the fallback.", "warn")
             fb_provider = self.provider_name if client is self.provider else getattr(client, "hubble_name",
                                                                                       "fallback")
+            if (fb_provider, fallback) in tried:
+                raise last_error
+            tried.add((fb_provider, fallback))
+            where = "" if client is self.provider else " on another provider"
+            why = "cannot use tools here" if tools_unsupported(str(last_error)) else str(last_error)
+            self.events.notice(f"{failed_model} failed ({why}). Using fallback model {fallback}{where} for this "
+                               "request; /model to switch, /fallback to choose the fallback.", "warn")
             self._served = (fb_provider, fallback, True)
             started = time.time()
             try:
@@ -521,7 +533,11 @@ class Agent:
             except ProviderError as e2:
                 self.stats_log.call(fb_provider, fallback, False, status=e2.status, error=str(e2),
                                     duration=time.time() - started, subagent=self.is_subagent, fallback=True)
-                raise
+                if not tools_unsupported(str(e2)) or self._partial_text:
+                    raise
+                NO_TOOLS.add((fb_provider, fallback))  # a chat-only deployment: try the next candidate
+                last_error, failed_model = e2, fallback
+        raise last_error
 
     def _parallel_ok(self, calls: List[ToolCall]) -> bool:
         """Several sub-agent tasks in one turn run concurrently, as long as none of them can

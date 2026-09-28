@@ -47,14 +47,34 @@ TRANSIENT_STATUS = {408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 524, 529}
 RETRY_STATUS = TRANSIENT_STATUS | {401}
 
 
+PROBE_TOOL = [{"type": "function", "function": {
+    "name": "noop", "description": "Does nothing. Do not call it; just answer the user.",
+    "parameters": {"type": "object", "properties": {}}}}]
+
+
+def tools_unsupported(message: str) -> bool:
+    """Does this API error mean 'this model/deployment cannot do tool calling'?"""
+    m = (message or "").lower()
+    return any(s in m for s in ("tool choice", "tool_choice", "tool-call-parser", "enable-auto-tool-choice",
+                                "does not support tools", "tools are not supported", "tool use is not supported",
+                                "function calling is not", "does not support function"))
+
+
 def _probe(client: httpx.Client, base_url: str, headers: Dict[str, str], model: str, timeout: float) -> Dict[str, Any]:
     # 32 tokens, not 10: reasoning models spend a small budget thinking and return empty content.
-    payload = {"model": model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 32, "temperature": 0.1}
+    # The request offers a tool, the way Hubble always does: a deployment without tool calling
+    # rejects it, and then the model is still usable for chat but never as an agent or fallback.
+    payload = {"model": model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 32,
+               "temperature": 0.1, "tools": PROBE_TOOL, "tool_choice": "auto"}
     start = time.time()
     result = {"model": model, "available": False, "transient": False, "status_code": None, "latency_ms": 0,
-              "sample": "", "reason": ""}
+              "sample": "", "reason": "", "tools": True}
     try:
         resp = client.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=timeout)
+        if resp.status_code == 400 and tools_unsupported(resp.text):
+            result["tools"] = False
+            payload = {k: v for k, v in payload.items() if k not in ("tools", "tool_choice")}
+            resp = client.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=timeout)
         result["latency_ms"] = round((time.time() - start) * 1000)
         result["status_code"] = resp.status_code
         text = resp.text
@@ -71,6 +91,8 @@ def _probe(client: httpx.Client, base_url: str, headers: Dict[str, str], model: 
             finish = choices[0].get("finish_reason") if choices else None
             if content:
                 result.update(available=True, reason="OK", sample=content.replace("\n", " ")[:60])
+            elif msg.get("tool_calls"):
+                result.update(available=True, reason="OK (called the tool)", sample="(tool call)")
             elif reasoning or finish == "length":
                 # It answered -- it just spent the budget thinking. That model works.
                 result.update(available=True, reason="OK (reasoning only)", sample=reasoning.replace("\n", " ")[:60])
@@ -246,6 +268,7 @@ class ModelScanner:
             "working_models": [{"model": r["model"], "latency_ms": r["latency_ms"],
                                 "owner": owners.get(r["model"], ""), "sample": r["sample"],
                                 "context_length": context_lengths.get(r["model"]),
+                                "tools": r.get("tools", True),
                                 **({"stale": True} if r.get("stale") else {})} for r in working],
             "all_results": results,
         }

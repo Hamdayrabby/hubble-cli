@@ -228,7 +228,7 @@ def provider_models(name: str) -> List[Dict[str, Any]]:
     working = {m["model"]: m for m in data.get("working_models", []) if m.get("model")}
     results = {r["model"]: r for r in data.get("all_results", []) if isinstance(r, dict) and r.get("model")}
     out = [{"model": m, "category": "Available", "latency_ms": w.get("latency_ms"), "available": True,
-           "context_length": w.get("context_length")} for m, w in working.items()]
+           "context_length": w.get("context_length"), "tools": w.get("tools")} for m, w in working.items()]
     for m in data.get("all_ids", []):
         if m in working:
             continue
@@ -242,6 +242,20 @@ def provider_models(name: str) -> List[Dict[str, Any]]:
         else:
             out.append({"model": m, "category": "Unavailable", "latency_ms": None, "available": False})
     return out
+
+
+# (provider, model) pairs seen failing because the deployment has no tool calling, this session.
+NO_TOOLS: set = set()
+# Models that are not chat/agent models at all, whatever a "hi" probe says.
+NON_CHAT = re.compile(r"(^|[/_-])(parse|embed|embedding|rerank|reranker|guard|safety|moderation|whisper|tts|"
+                      r"speech|asr|ocr|clip|retriever|reward)([/_.-]|$)", re.I)
+
+
+def agent_capable(provider: str, entry: Dict[str, Any]) -> bool:
+    """Can this model run Hubble's agent loop (chat + tool calling)?"""
+    model = entry.get("model", "")
+    return (entry.get("tools") is not False and (provider, model) not in NO_TOOLS
+            and not NON_CHAT.search(model))
 
 
 def resolve_fallback(settings: Dict[str, Any], providers: Dict[str, "ProviderConfig"], provider: str,
@@ -258,12 +272,12 @@ def resolve_fallback(settings: Dict[str, Any], providers: Dict[str, "ProviderCon
         per_provider = per_map.get(LEGACY_DEFAULT_PROVIDER)  # saved before the rename
     if per_provider == "off":
         return None
-    if per_provider and per_provider != model:
+    if per_provider and per_provider != model and (provider, per_provider) not in NO_TOOLS:
         return provider, per_provider
     default = settings.get("fallback_model")
     if not default and not per_provider:
         return None
-    known = provider_models(provider)
+    known = [m for m in provider_models(provider) if agent_capable(provider, m)]
     names = {m["model"] for m in known if m.get("available") is not False}
     if default and default != model and default in names:
         return provider, default
@@ -272,7 +286,8 @@ def resolve_fallback(settings: Dict[str, Any], providers: Dict[str, "ProviderCon
     if verified:
         return provider, verified[0]["model"]
     if default and provider != DEFAULT_PROVIDER and DEFAULT_PROVIDER in providers:
-        if default in {m["model"] for m in provider_models(DEFAULT_PROVIDER) if m.get("available") is not False}:
+        builtin = [m for m in provider_models(DEFAULT_PROVIDER) if agent_capable(DEFAULT_PROVIDER, m)]
+        if default in {m["model"] for m in builtin if m.get("available") is not False}:
             return DEFAULT_PROVIDER, default
     return None
 
