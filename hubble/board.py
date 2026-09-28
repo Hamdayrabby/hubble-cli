@@ -10,7 +10,8 @@ from rich.text import Text
 
 from hubble.spinner import GLYPHS, Shimmer
 
-STATUS_ICON = {"done": ("✔", "bold green"), "failed": ("✘", "bold red"), "stopped": ("■", "yellow")}
+STATUS_ICON = {"done": ("✔", "bold green"), "failed": ("✘", "bold red"), "stopped": ("■", "yellow"),
+               "partial": ("◐", "bold yellow")}  # partial: ran out of steps, report may be incomplete
 
 
 class _Row:
@@ -91,10 +92,12 @@ class SubagentBoard:
             head = self.header.__rich__()
             head.append(f"  {done}/{len(rows)} done · {elapsed}s · ctrl+c stops all", style="dim")
         else:
-            failed = sum(r.status == "failed" for r in rows)
+            ok = sum(r.status == "done" for r in rows)
+            partial = sum(r.status == "partial" for r in rows)
             head = Text.assemble(("● ", "bold magenta"),
                                  (f"{len(rows)} sub-agent{'s' if len(rows) != 1 else ''} finished", "bold"),
-                                 (f"  {done - failed}/{len(rows)} succeeded · {elapsed}s", "dim"))
+                                 (f"  {ok}/{len(rows)} succeeded" + (f", {partial} partial" if partial else "")
+                                  + f" · {elapsed}s", "dim"))
 
         label_w = min(max((len(r.label) for r in rows), default=8), 42)
         table = Table.grid(padding=(0, 1))

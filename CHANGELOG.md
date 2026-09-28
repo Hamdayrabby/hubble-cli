@@ -18,6 +18,11 @@
   next chunk, or a long shell command ended (a 20 s stall took 20 s to interrupt; now ~0.1 s).
   Ctrl+C with text typed clears the line; twice on an empty prompt exits.
 - A spurious HTTP 401 from a gateway is retried once.
+- **Sub-agents always report:** they are told their step budget up front (and to batch reads), get
+  a reminder 3 steps before the end, and when they run out they are asked for a final report instead
+  of returning nothing (or, if the model still won't write one, a list of what they read). Such runs
+  show as ◐ partial, not ✔. Default limits are now 30 (research) / 40 (edit) steps;
+  `subagent_max_turns` changes them.
 
 ## 4.2.0
 

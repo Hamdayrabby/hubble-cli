@@ -88,6 +88,7 @@ class RunStats:
     model_calls: int = 0
     tool_calls: int = 0
     interrupted: bool = False
+    hit_step_limit: bool = False
     error: Optional[str] = None
 
 
@@ -352,9 +353,14 @@ class Agent:
     def _loop(self, stats: RunStats) -> str:
         max_turns = int(self.settings.get("max_turns", 40))
         schemas = [t.schema() for t in self.tools]
-        for _ in range(max_turns):
+        for turn in range(max_turns):
             if self.cancel.is_set():
                 raise KeyboardInterrupt
+            left = max_turns - turn
+            if self.is_subagent and left == 3:
+                self._note_on_last_tool_result(
+                    "[Hubble: 3 steps left. Finish what you are doing and write your final report next; "
+                    "do not start new searches.]")
             ratio = float(self.settings.get("auto_compact_ratio", 0.8))
             if ratio and self.context_ratio() >= ratio and len(self.messages) > 4:
                 self.events.notice(f"Context {self.context_ratio():.0%} full; compacting...", "warn")
@@ -420,8 +426,50 @@ class Agent:
                     self._route["struggle"].note_tool(output, failed)
             self._maybe_escalate()
 
+        stats.hit_step_limit = True
+        if self.is_subagent:
+            return self._final_report(schemas, stats)
         self.events.notice(f"Stopped after {max_turns} model calls (max_turns). Say 'continue' to keep going.", "warn")
         return ""
+
+    def _note_on_last_tool_result(self, note: str):
+        """Tell the model something mid-task without adding a user turn right after a tool result
+        (which some backends, e.g. Mistral, reject): the note rides on the last tool result."""
+        for m in reversed(self.messages):
+            if m.get("role") == "tool":
+                m["content"] = f"{m.get('content') or ''}\n\n{note}"
+                return
+            if m.get("role") != "assistant":
+                break
+
+    def _final_report(self, schemas, stats: RunStats) -> str:
+        """A sub-agent out of steps still owes a report: ask for one last answer from what it has
+        found, instead of returning nothing and throwing all of its reading away."""
+        self._note_on_last_tool_result(
+            "[Hubble: step limit reached. Do NOT call any more tools. Write your final report now from "
+            "what you have found so far, and list what you could not check.]")
+        try:
+            result = self._stream_with_fallback(schemas)
+            self._account(result, stats)
+            self.events.turn_end(result)
+        except ProviderError:
+            result = TurnResult()
+        if result.text.strip():
+            self._append({"role": "assistant", "content": result.text})
+            return result.text + "\n\n(Note: this sub-agent ran out of steps; the report may be incomplete.)"
+        # The model still would not write one: hand back what it looked at, so nothing is lost.
+        looked = []
+        for m in self.messages:
+            for tc in m.get("tool_calls") or []:
+                try:
+                    a = parse_arguments(tc["function"]["arguments"])
+                except ValueError:
+                    a = {}
+                what = a.get("path") or a.get("pattern") or a.get("query") or a.get("command") or ""
+                looked.append(f"{tc['function']['name']}({what})")
+        return ("(This sub-agent ran out of steps before writing a report. It looked at: "
+                + ", ".join(looked[-40:]) + ". Read the most relevant of these yourself instead of "
+                "re-running the same task.)")
 
     def _stream_with_fallback(self, schemas) -> TurnResult:
         messages = [{"role": "system", "content": self.system_prompt()}] + self.messages
@@ -831,10 +879,14 @@ class TaskTool(Tool):
                     continue
                 if attempt:
                     p.events.subagent_step(key, f"retrying on {model}", is_tool=False)
-                sub = Agent(client, {**p.settings, "model": model, "max_turns": 30 if edit else 20,
+                steps = int(p.settings.get("subagent_max_turns") or (40 if edit else 30))
+                sub = Agent(client, {**p.settings, "model": model, "max_turns": steps,
                                      "auto_compact_ratio": 0},
                             sub_ctx, perms, _SubagentEvents(p.events, label, key), tools=tools,
-                            system_override=system)
+                            system_override=f"{system}\n\nYou have at most {steps} steps (model calls). Use "
+                                            "them well: call several tools in one step when they are "
+                                            "independent (e.g. read three files at once), and write your "
+                                            "report as soon as you can answer; do not read everything.")
                 subs.append(sub)
                 sub.cancel = p.cancel
                 sub.is_subagent = True
@@ -861,8 +913,13 @@ class TaskTool(Tool):
                                     "trying the next model", "warn")
             else:
                 raise ToolError(f"sub-agent failed on every model tried: {detail.removeprefix('failed: ')}")
-            status = "done"
-            detail = f"report ready ({len(report or ''):,} chars)" if report else "no report"
+            limited = subs[-1].last_stats.hit_step_limit if subs else False
+            if not (report or "").strip():
+                status, detail = "failed", "no report"
+            elif limited:
+                status, detail = "partial", f"ran out of steps · partial report ({len(report):,} chars)"
+            else:
+                status, detail = "done", f"report ready ({len(report):,} chars)"
             report = report or "(sub-agent returned no report)"
             if isolated:
                 from hubble import worktree
