@@ -208,6 +208,27 @@ All events:
 | `Stop` | The turn is about to end | block = keep going with `reason` as the next instruction |
 | `SessionEnd` | Hubble exits | observe |
 
+## Routing and stats
+
+**`/stats`** (or `hubble --stats [days]`) shows, per model, how many of your prompts it finished, how often
+its calls failed and why (`429×12 503×3`), its speed and time to first token, tokens used, and an estimated
+cost (Claude list prices built in; add others with `"model_prices": {"model": [in_per_M, out_per_M]}`).
+Everything is recorded locally in `~/.hubble/stats.jsonl`; `"stats": false` turns it off.
+
+**`/route`** sends easy prompts to a fast, cheap model and hard ones to a strong model:
+```
+/route fast aihub:ministral-8b-latest
+/route strong anthropic:claude-opus-5
+/route auto        # pick the fast model from your own /stats: the fastest one that has been reliable
+/route off
+```
+- Questions, lookups, explanations and short messages go to **fast**; fixes, changes, refactors, debugging,
+  and long or code-heavy prompts go to **strong**. Each prompt shows where it went and why.
+- Research sub-agents run on fast; edit sub-agents stay on strong.
+- If the fast model struggles mid-task (an empty reply, malformed tool calls, tool calls that keep failing),
+  the rest of that task moves to strong, automatically.
+- Tiers can be on different providers (`provider:model`). `/stats` marks tasks that escalated with ↑.
+
 ## Custom agents
 
 Named specialists the model can delegate to with the `task` tool. One Markdown file each, in

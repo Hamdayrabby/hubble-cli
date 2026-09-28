@@ -129,6 +129,13 @@ class Agent:
         self.is_subagent = False
         self.session_context = ""  # from SessionStart hooks; part of the system prompt
         self._session_started = False
+        from hubble.stats import StatsLog
+        self.stats_log = StatsLog(enabled=settings.get("stats", True) is not False)
+        # provider name -> API client; set by the REPL/headless runner so routing can switch provider.
+        self.client_for = None
+        self.last_route = None     # (tier, provider, model, reasons) of the last routed prompt
+        self._route = None         # per-task routing state while a routed task runs
+        self._served = None        # (provider, model, via_fallback) of the last successful call
 
     def start_session(self, source: str = "startup"):
         """Run SessionStart hooks once. source: startup | resume | clear."""
@@ -225,6 +232,75 @@ class Agent:
 
     def run(self, prompt: str, images: Optional[List[str]] = None) -> str:
         """images: data: URLs to send with the prompt (the model must support vision)."""
+        started = time.time()
+        saved = self._begin_route(prompt) if not self.is_subagent else None
+        result = ""
+        try:
+            result = self._run(prompt, images)
+            return result
+        finally:
+            s = self.last_stats
+            ok = bool(result and result.strip()) and not s.error and not s.interrupted
+            reason = "interrupted" if s.interrupted else ("error: " + s.error[:80] if s.error else
+                                                           ("" if ok else "no answer"))
+            route = self._route
+            self.stats_log.task(self.provider_name, self.model, ok, reason=reason, calls=s.model_calls,
+                                tools=s.tool_calls, prompt_tokens=s.prompt_tokens,
+                                completion_tokens=s.completion_tokens, duration=time.time() - started,
+                                tier=route["tier"] if route else "", escalated=bool(route and route["escalated"]),
+                                subagent=self.is_subagent)
+            if saved is not None:
+                self.provider, self.provider_name, self.model = saved
+            self._route = None
+
+    # ----- routing ---------------------------------------------------------
+
+    def _client(self, provider_name: str):
+        if provider_name == self.provider_name:
+            return self.provider
+        return self.client_for(provider_name) if self.client_for else None
+
+    def _switch(self, spec: str) -> bool:
+        from hubble.router import parse_spec
+        prov, model = parse_spec(spec, self.provider_name)
+        client = self._client(prov)
+        if client is None:
+            self.events.notice(f"Routing: provider '{prov}' is not configured; staying on {self.model}.", "warn")
+            return False
+        self.provider, self.provider_name, self.model = client, prov, model
+        return True
+
+    def _begin_route(self, prompt: str):
+        """Pick the tier for this prompt and switch to its model. Returns what to restore, or None."""
+        from hubble.router import Struggle, classify, routing_config
+        cfg = routing_config(self.settings)
+        if not cfg:
+            return None
+        saved = (self.provider, self.provider_name, self.model)
+        route = classify(prompt)
+        if not self._switch(cfg[route.tier]):
+            return None
+        self._route = {"tier": route.tier, "cfg": cfg, "struggle": Struggle(), "escalated": False}
+        self.last_route = (route.tier, self.provider_name, self.model, route.reasons)
+        self.events.notice(f"→ {route.tier}: {self.model} ({'; '.join(route.reasons)})", "dim")
+        return saved
+
+    def _maybe_escalate(self) -> bool:
+        """If the fast model is struggling, move the rest of this task to the strong model."""
+        r = self._route
+        if not r or r["tier"] != "fast" or r["escalated"]:
+            return False
+        why = r["struggle"].reason()
+        if not why:
+            return False
+        if not self._switch(r["cfg"]["strong"]):
+            return False
+        r["escalated"] = True
+        self.events.notice(f"Fast model struggling ({why}); switching to {self.model} for the rest of this task.",
+                           "warn")
+        return True
+
+    def _run(self, prompt: str, images: Optional[List[str]] = None) -> str:
         stats = RunStats()
         self.last_stats = stats
         if not self.is_subagent:
@@ -288,8 +364,16 @@ class Agent:
             self.events.turn_start()
             result = self._stream_with_fallback(schemas)
             self._partial_text = ""
-            self._account(result, stats)
+            p_toks, c_toks = self._account(result, stats)
+            served = self._served or (self.provider_name, self.model, False)
+            self.stats_log.call(served[0], served[1], True, prompt_tokens=p_toks, completion_tokens=c_toks,
+                                duration=result.duration, ttft_ms=result.ttft_ms, subagent=self.is_subagent,
+                                fallback=served[2])
             self.events.turn_end(result)
+            if self._route:
+                self._route["struggle"].note_turn(result.text, len(result.tool_calls))
+                if not result.text and not result.tool_calls and self._maybe_escalate():
+                    continue  # retry this turn on the strong model instead of ending in silence
 
             text = result.text
             if not text and not result.tool_calls:
@@ -331,6 +415,10 @@ class Agent:
                 stats.tool_calls += 1
                 self._append({"role": "tool", "tool_call_id": call.id, "name": call.name, "content": output})
                 self.context_tokens += estimate_tokens(output)
+                if self._route:
+                    failed = output.startswith(("Error:", "Permission denied", "Blocked by hook", "The user denied"))
+                    self._route["struggle"].note_tool(output, failed)
+            self._maybe_escalate()
 
         self.events.notice(f"Stopped after {max_turns} model calls (max_turns). Say 'continue' to keep going.", "warn")
         return ""
@@ -340,9 +428,13 @@ class Agent:
         kwargs = dict(tools=schemas, temperature=self.temperature,
                       max_tokens=int(self.settings.get("max_tokens", 8192)),
                       on_text=self._on_text, on_reasoning=self.events.reasoning)
+        self._served = (self.provider_name, self.model, False)
+        started = time.time()
         try:
             return self.provider.stream(self.model, messages, **kwargs)
         except ProviderError as e:
+            self.stats_log.call(self.provider_name, self.model, False, status=e.status, error=str(e),
+                                duration=time.time() - started, subagent=self.is_subagent)
             if not e.transient or self._partial_text:
                 raise
             if self.fallback_resolver is not None:
@@ -356,7 +448,16 @@ class Agent:
             where = "" if client is self.provider else " on another provider"
             self.events.notice(f"{self.model} failed ({e}). Using fallback model {fallback}{where} for this "
                                "request; /model to switch, /fallback to choose the fallback.", "warn")
-            return client.stream(fallback, messages, **kwargs)
+            fb_provider = self.provider_name if client is self.provider else getattr(client, "hubble_name",
+                                                                                      "fallback")
+            self._served = (fb_provider, fallback, True)
+            started = time.time()
+            try:
+                return client.stream(fallback, messages, **kwargs)
+            except ProviderError as e2:
+                self.stats_log.call(fb_provider, fallback, False, status=e2.status, error=str(e2),
+                                    duration=time.time() - started, subagent=self.is_subagent, fallback=True)
+                raise
 
     def _parallel_ok(self, calls: List[ToolCall]) -> bool:
         """Several sub-agent tasks in one turn run concurrently, as long as none of them can
@@ -419,6 +520,7 @@ class Agent:
         self.total_prompt_tokens += prompt_toks
         self.total_completion_tokens += completion_toks
         self.context_tokens = prompt_toks + completion_toks
+        return prompt_toks, completion_toks
 
     def _close_dangling_tool_calls(self):
         repaired = repair_history(self.messages)
@@ -704,6 +806,14 @@ class TaskTool(Tool):
         sub.provider_name = p.provider_name
         sub.fallback_client = p.fallback_client
         sub.fallback_resolver = p.fallback_resolver
+        sub.stats_log = p.stats_log
+        sub.client_for = p.client_for
+        # Routing: research sub-agents (read_only, no model chosen) run on the fast tier.
+        from hubble.router import routing_config
+        cfg = routing_config(p.settings)
+        if cfg and not edit and not args.get("model") and not (spec and spec.model):
+            if sub._switch(cfg["fast"]):
+                sub.settings["model"] = sub.model
         status, detail = "failed", "crashed"
         try:
             report = sub.run(args["prompt"])

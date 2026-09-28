@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **`/stats` and `hubble --stats`:** per model, the share of your prompts it finished, call failures by
+  status, speed, time to first token, tokens and estimated cost, from a local log
+  (`~/.hubble/stats.jsonl`).
+- **`/route`:** cost/quality routing. Easy prompts go to a fast model, hard ones to a strong model,
+  research sub-agents to fast, and a fast task that struggles escalates to strong. `/route auto`
+  picks the fast model from your own stats.
+
 ## 4.2.0
 
 - **Claude provider:** native Anthropic Messages API support via the official `anthropic` SDK —

@@ -66,12 +66,15 @@ class ProviderConfig:
 
 
 def make_client(cfg: "ProviderConfig"):
-    """The right API client for a provider's kind."""
+    """The right API client for a provider's kind, tagged with the provider's name (for stats)."""
     if cfg.kind == "anthropic":
         from hubble.anthropic_provider import AnthropicProvider
-        return AnthropicProvider(cfg.base_url, cfg.api_key)
-    from hubble.provider import OpenAICompatProvider
-    return OpenAICompatProvider(cfg.base_url, cfg.api_key)
+        client = AnthropicProvider(cfg.base_url, cfg.api_key)
+    else:
+        from hubble.provider import OpenAICompatProvider
+        client = OpenAICompatProvider(cfg.base_url, cfg.api_key)
+    client.hubble_name = cfg.name
+    return client
 
 
 def _read_file() -> Dict[str, Any]:

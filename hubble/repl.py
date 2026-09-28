@@ -88,6 +88,8 @@ class Repl:
     def __init__(self, agent: Agent, store: SessionStore, providers: Optional[Dict[str, ProviderConfig]] = None):
         self.providers: Dict[str, ProviderConfig] = dict(providers or {})
         self.clients: Dict[str, OpenAICompatProvider] = {agent.provider_name: agent.provider}
+        # Lets routing (and routed sub-agents) switch to a model on another configured provider.
+        agent.client_for = lambda name: self.client(name) if name in self.providers else None
         self.scanners: Dict[str, ModelScanner] = {}
         self._unannounced: set = set()
         self._quiet_scans: set = set()  # startup scans: say nothing unless they fail
@@ -138,7 +140,10 @@ class Repl:
           ("permissions",), "[mode]")
         r("persona", self.cmd_persona, f"System persona: {', '.join(PERSONAS)}", args="[name]")
         r("resume", self.cmd_resume, "Resume a previous session of this project", ("sessions",), "[id|#]")
-        r("cost", self.cmd_cost, "Token usage and context size", ("stats", "tokens", "status"))
+        r("cost", self.cmd_cost, "Token usage and context size of this session", ("tokens", "status"))
+        r("stats", self.cmd_stats, "Which models finish your tasks, how fast, at what cost", args="[days]")
+        r("route", self.cmd_route, "Route easy prompts to a fast model and hard ones to a strong model",
+          ("routing",), "[fast <model> | strong <model> | auto | off | on]")
         r("context", self.cmd_context, "Show what is in the context window")
         r("undo", self.cmd_undo, "Revert file changes from the last turn that edited files", ("rewind",))
         r("diff", self.cmd_diff, "Show git diff of the workspace")
@@ -1004,6 +1009,71 @@ class Repl:
         for s in self.agent.skills:
             console.print(f"  [bold]/{s.name}[/bold] [dim]({s.scope})[/dim]  {escape(s.description)}")
         console.print("[dim]Run one with /<name>, or the model calls them on its own when relevant.[/dim]")
+
+    def cmd_stats(self, arg):
+        from hubble import stats
+        try:
+            days = float(arg) if arg.strip() else 30.0
+        except ValueError:
+            console.print("Usage: /stats [days]  (default 30)")
+            return
+        rows = stats.summarize(stats.load(days=days), self.agent.settings.get("model_prices"))
+        console.print(stats.render(rows, days))
+
+    def cmd_route(self, arg):
+        from hubble import stats
+        from hubble.router import parse_spec, routing_config
+        s = self.agent.settings
+        cfg = dict(s.get("routing") or {})
+        parts = arg.split(maxsplit=1)
+        sub = parts[0].lower() if parts else ""
+        cur = f"{self.agent.provider_name}:{self.agent.model}"
+
+        def save():
+            s["routing"] = cfg
+            save_user_setting("routing", cfg)
+
+        if sub in ("fast", "strong") and len(parts) == 2:
+            spec = parts[1].strip()
+            prov, model = parse_spec(spec, self.agent.provider_name)
+            if prov not in self.providers:
+                console.print(f"[red]Unknown provider '{escape(prov)}'. Use provider:model, e.g. aihub:codestral-latest[/red]")
+                return
+            cfg[sub] = f"{prov}:{model}"
+            cfg.setdefault("strong" if sub == "fast" else "fast", cur)
+            cfg["enabled"] = True
+            save()
+        elif sub == "auto":
+            rows = stats.summarize(stats.load(days=30), s.get("model_prices"))
+            fast = stats.best_fast_model(rows, exclude=[cur, self.agent.model])
+            if not fast:
+                console.print("[yellow]Not enough history yet to pick a fast model (needs a model with 5+ calls at "
+                              "90%+ success). Use /route fast <model>.[/yellow]")
+                return
+            cfg.update(fast=f"{fast['provider']}:{fast['model']}", strong=cfg.get("strong") or cur, enabled=True)
+            save()
+            console.print(f"[dim]Picked the fastest reliable model you have used: {escape(fast['model'])} "
+                          f"({fast['tok_per_s']:.0f} tok/s, {fast['call_success']:.0%} of {fast['calls']} calls ok).[/dim]")
+        elif sub in ("off", "on"):
+            cfg["enabled"] = sub == "on"
+            save()
+        elif sub:
+            console.print("Usage: /route [fast <model> | strong <model> | auto | on | off]")
+            return
+        active = routing_config(s)
+        if not active:
+            state = "off" if cfg.get("fast") and cfg.get("strong") else "not set up"
+            console.print(f"[yellow]Routing: {state}.[/yellow] [dim]Set it with /route fast <model> and "
+                          "/route strong <model>, or /route auto to pick the fast model from your /stats.[/dim]")
+            return
+        console.print(f"[green]Routing on[/green]  fast [bold]{escape(active['fast'])}[/bold]  ·  "
+                      f"strong [bold]{escape(active['strong'])}[/bold]")
+        console.print("[dim]Questions, lookups and short messages → fast; changes, fixes, debugging, long or "
+                      "code-heavy prompts → strong. Research sub-agents use fast. A fast task that struggles "
+                      "switches to strong. /route off to stop.[/dim]")
+        if self.agent.last_route:
+            tier, prov, model, reasons = self.agent.last_route
+            console.print(f"[dim]Last prompt → {tier} ({escape(model)}): {escape('; '.join(reasons))}[/dim]")
 
     def cmd_install_github(self, arg):
         from hubble.github import install_workflow

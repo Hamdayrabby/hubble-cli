@@ -56,6 +56,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-session", action="store_true", help="do not save this session")
     p.add_argument("--quiet", action="store_true", help="with -p: hide tool progress on stderr")
     p.add_argument("--test", metavar="MODEL", help="check that a model responds, then exit")
+    p.add_argument("--stats", nargs="?", const=30.0, type=float, metavar="DAYS",
+                   help="show which models finished your tasks, how fast and at what cost (default: 30 days)")
     p.add_argument("--add-to-path", action="store_true",
                    help="put the folder with the hubble command on your PATH (fixes 'hubble is not recognized')")
     p.add_argument("-v", "--version", action="version", version=f"hubble {__version__}")
@@ -73,6 +75,15 @@ def main(argv=None):
     if args.add_to_path:
         from hubble.setup_path import add_to_path
         sys.exit(add_to_path())
+    if args.stats is not None:
+        from rich.console import Console
+        from hubble import stats
+        try:
+            prices = load_settings(Path(args.cwd or ".").resolve()).get("model_prices")
+        except ConfigError:
+            prices = None
+        Console().print(stats.render(stats.summarize(stats.load(days=args.stats or None), prices), args.stats))
+        sys.exit(0)
     if not args.print_mode and sys.stdin.isatty():
         from hubble.setup_path import path_hint
         hint = path_hint()
@@ -190,20 +201,25 @@ def main(argv=None):
 
 
 def _headless_resolver(settings, providers, agent):
-    from hubble.providers import resolve_fallback
+    from hubble.providers import make_client, resolve_fallback
     clients = {agent.provider_name: agent.provider}
+
+    def client_for(name):
+        if name not in clients:
+            if name not in providers:
+                return None
+            clients[name] = make_client(providers[name])
+        return clients[name]
+
+    agent.client_for = client_for  # routing may switch provider too
 
     def resolve(provider_name, model):
         choice = resolve_fallback(settings, providers, provider_name, model)
         if not choice:
             return None
         name, fb = choice
-        if name not in clients:
-            if name not in providers:
-                return None
-            from hubble.providers import make_client
-            clients[name] = make_client(providers[name])
-        return clients[name], fb
+        client = client_for(name)
+        return (client, fb) if client else None
     return resolve
 
 
