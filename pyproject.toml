@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hubble-cli"
 dynamic = ["version"]
-description = "Hubble: agentic coding CLI for AIHub and other OpenAI-compatible APIs"
+description = "Agentic coding CLI for OpenAI-compatible APIs, Claude, and local LLMs"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"

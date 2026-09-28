@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 4.2.0
 
 - **Claude provider:** native Anthropic Messages API support via the official `anthropic` SDK —
   streaming, tool use, images, thinking blocks echoed back verbatim, system-prompt caching, the real
@@ -14,6 +14,8 @@
 - `python -m hubble --add-to-path` fixes "hubble is not recognized" after a pip install whose
   Scripts folder is not on PATH (user PATH on Windows, shell profile elsewhere); Hubble also shows
   a one-line tip when started that way. Tested on Python 3.13 and 3.14 too.
+- Cleaner bottom bar: no white reverse-video background, a thin rule above it, dim labels with
+  bright values, no emoji; status items wrap whole onto extra lines, token stats keep their own line.
 
 ## 4.1.2
 
