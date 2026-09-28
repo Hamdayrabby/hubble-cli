@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -494,7 +495,7 @@ class Shell(Tool):
         except OSError as e:
             raise ToolError(f"Could not start docker: {e}")
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
+            stdout, stderr = communicate_interruptibly(proc, timeout)
         except subprocess.TimeoutExpired:
             self._docker_kill(docker, name)
             stdout, stderr = _drain(proc)
@@ -529,6 +530,19 @@ def _format_result(stdout: str, stderr: str, returncode: int) -> str:
         parts.append(f"[stderr]\n{stderr.rstrip()}")
     parts.append(f"[exit code {returncode}]")
     return truncate("\n".join(parts))
+
+
+def communicate_interruptibly(proc: subprocess.Popen, timeout: float):
+    """proc.communicate(timeout=...) in short slices. One long communicate() on Windows waits in
+    a thread join that Ctrl+C cannot break into, so the key did nothing until the command ended.
+    Raises subprocess.TimeoutExpired once `timeout` seconds have passed in total."""
+    deadline = time.time() + timeout
+    while True:
+        try:
+            return proc.communicate(timeout=min(0.25, max(0.01, deadline - time.time())))
+        except subprocess.TimeoutExpired:
+            if time.time() >= deadline:
+                raise
 
 
 def _kill_tree(proc: subprocess.Popen):

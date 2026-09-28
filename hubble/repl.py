@@ -234,6 +234,16 @@ class Repl:
         def _(event):
             event.current_buffer.insert_text("\n")
 
+        @kb.add("c-c")
+        def _(event):
+            # Ctrl+C with text typed clears the line; on an empty line it is the first half of
+            # "press Ctrl+C twice to exit".
+            buf = event.current_buffer
+            if buf.text:
+                buf.reset()
+            else:
+                event.app.exit(exception=KeyboardInterrupt)
+
         @kb.add("s-tab")
         def _(event):
             self.agent.permissions.cycle_mode()
@@ -529,6 +539,11 @@ class Repl:
                 else:
                     text = session.prompt(HTML("<ansicyan><b>❯</b></ansicyan> "))
             except KeyboardInterrupt:
+                now = time.time()
+                if now - self._last_ctrl_c < 2.0:
+                    break
+                self._last_ctrl_c = now
+                console.print("[dim]Press Ctrl+C again to exit (or type /exit).[/dim]")
                 continue
             except EOFError:
                 break
