@@ -351,7 +351,12 @@ class Agent:
         self.events.text(delta)
 
     def _loop(self, stats: RunStats) -> str:
-        max_turns = int(self.settings.get("max_turns", 40))
+        # No small fixed step cap: a run ends when the model is done, or when it stops making
+        # progress (repeating itself, nothing new for several steps), or -- for sub-agents -- when
+        # it has used its token budget. max_turns is only a high backstop against runaways.
+        max_turns = int(self.settings.get("max_turns", 100))
+        budget = int(self.settings.get("subagent_token_budget") or 2_000_000)
+        progress = _Progress()
         schemas = [t.schema() for t in self.tools]
         for turn in range(max_turns):
             if self.cancel.is_set():
@@ -361,6 +366,15 @@ class Agent:
                 self._note_on_last_tool_result(
                     "[Hubble: 3 steps left. Finish what you are doing and write your final report next; "
                     "do not start new searches.]")
+            stop = progress.stalled()
+            if self.is_subagent and not stop and stats.prompt_tokens + stats.completion_tokens >= budget:
+                stop = f"token budget reached ({budget:,} tokens)"
+            if stop:
+                stats.hit_step_limit = True
+                if self.is_subagent:
+                    return self._final_report(schemas, stats, stop)
+                self.events.notice(f"Stopped: {stop}. Say 'continue' to keep going, or rephrase the task.", "warn")
+                return ""
             ratio = float(self.settings.get("auto_compact_ratio", 0.8))
             if ratio and self.context_ratio() >= ratio and len(self.messages) > 4:
                 self.events.notice(f"Context {self.context_ratio():.0%} full; compacting...", "warn")
@@ -425,10 +439,11 @@ class Agent:
                     failed = output.startswith(("Error:", "Permission denied", "Blocked by hook", "The user denied"))
                     self._route["struggle"].note_tool(output, failed)
             self._maybe_escalate()
+            progress.note(result.tool_calls)
 
         stats.hit_step_limit = True
         if self.is_subagent:
-            return self._final_report(schemas, stats)
+            return self._final_report(schemas, stats, f"step limit reached ({max_turns} steps)")
         self.events.notice(f"Stopped after {max_turns} model calls (max_turns). Say 'continue' to keep going.", "warn")
         return ""
 
@@ -442,11 +457,12 @@ class Agent:
             if m.get("role") != "assistant":
                 break
 
-    def _final_report(self, schemas, stats: RunStats) -> str:
-        """A sub-agent out of steps still owes a report: ask for one last answer from what it has
-        found, instead of returning nothing and throwing all of its reading away."""
+    def _final_report(self, schemas, stats: RunStats, reason: str = "step limit reached") -> str:
+        """A sub-agent that has to stop still owes a report: ask for one last answer from what it
+        has found, instead of returning nothing and throwing all of its reading away."""
+        self.events.notice(f"wrapping up: {reason}", "dim")
         self._note_on_last_tool_result(
-            "[Hubble: step limit reached. Do NOT call any more tools. Write your final report now from "
+            f"[Hubble: {reason}. Do NOT call any more tools. Write your final report now from "
             "what you have found so far, and list what you could not check.]")
         try:
             result = self._stream_with_fallback(schemas)
@@ -456,7 +472,7 @@ class Agent:
             result = TurnResult()
         if result.text.strip():
             self._append({"role": "assistant", "content": result.text})
-            return result.text + "\n\n(Note: this sub-agent ran out of steps; the report may be incomplete.)"
+            return result.text + f"\n\n(Note: this sub-agent was stopped early ({reason}); the report may be incomplete.)"
         # The model still would not write one: hand back what it looked at, so nothing is lost.
         looked = []
         for m in self.messages:
@@ -467,7 +483,7 @@ class Agent:
                     a = {}
                 what = a.get("path") or a.get("pattern") or a.get("query") or a.get("command") or ""
                 looked.append(f"{tc['function']['name']}({what})")
-        return ("(This sub-agent ran out of steps before writing a report. It looked at: "
+        return (f"(This sub-agent was stopped ({reason}) before writing a report. It looked at: "
                 + ", ".join(looked[-40:]) + ". Read the most relevant of these yourself instead of "
                 "re-running the same task.)")
 
@@ -696,6 +712,55 @@ SUBAGENT_VERBS = {"read_file": "reading", "grep": "searching for", "glob": "find
                   "web_search": "searching the web for"}
 
 
+class _Progress:
+    """Notices when a run stops getting anywhere: the same tool call over and over, or a stretch
+    of steps that only repeat calls it already made."""
+
+    REPEATS = 3        # the same exact call this many times
+    IDLE_STEPS = 6     # this many steps in a row with nothing new
+
+    def __init__(self):
+        self.seen: Dict[str, int] = {}
+        self.idle = 0
+        self.reason: Optional[str] = None
+
+    @staticmethod
+    def _sig(call: ToolCall) -> str:
+        try:
+            args = json.dumps(parse_arguments(call.arguments), sort_keys=True)
+        except ValueError:
+            args = call.arguments
+        return f"{call.name}:{args}"
+
+    CHANGES = {"write_file", "edit_file", "shell", "write_skill", "task"}
+
+    def note(self, calls: List[ToolCall]):
+        if not calls:
+            return
+        if any(c.name in self.CHANGES for c in calls):
+            # Something may have changed (a file edited, tests run): re-reading a file or re-running
+            # the tests after that is progress, not a loop. Start counting afresh.
+            self.seen.clear()
+            self.idle = 0
+            for c in calls:
+                self.seen[self._sig(c)] = 1
+            return
+        new = False
+        for c in calls:
+            sig = self._sig(c)
+            self.seen[sig] = self.seen.get(sig, 0) + 1
+            if self.seen[sig] == 1:
+                new = True
+            elif self.seen[sig] >= self.REPEATS and not self.reason:
+                self.reason = f"it kept repeating the same {c.name} call"
+        self.idle = 0 if new else self.idle + 1
+        if self.idle >= self.IDLE_STEPS and not self.reason:
+            self.reason = f"no progress for {self.IDLE_STEPS} steps (only repeating earlier calls)"
+
+    def stalled(self) -> Optional[str]:
+        return self.reason
+
+
 class _SubagentEvents(Events):
     """Forwards a sub-agent's progress to the parent UI under a stable key."""
 
@@ -879,14 +944,17 @@ class TaskTool(Tool):
                     continue
                 if attempt:
                     p.events.subagent_step(key, f"retrying on {model}", is_tool=False)
-                steps = int(p.settings.get("subagent_max_turns") or (40 if edit else 30))
+                # A high backstop only: sub-agents normally end on their own, or on the progress
+                # and token checks in _loop. Long runs compact their history like the main agent.
+                steps = int(p.settings.get("subagent_max_turns") or 150)
                 sub = Agent(client, {**p.settings, "model": model, "max_turns": steps,
-                                     "auto_compact_ratio": 0},
+                                     "auto_compact_ratio": float(p.settings.get("auto_compact_ratio", 0.8))},
                             sub_ctx, perms, _SubagentEvents(p.events, label, key), tools=tools,
-                            system_override=f"{system}\n\nYou have at most {steps} steps (model calls). Use "
-                                            "them well: call several tools in one step when they are "
-                                            "independent (e.g. read three files at once), and write your "
-                                            "report as soon as you can answer; do not read everything.")
+                            system_override=f"{system}\n\nWork efficiently: call several tools in one step "
+                                            "when they are independent (e.g. read three files at once), "
+                                            "never repeat a call you already made, and write your report "
+                                            "as soon as you can answer; do not read everything. If you stop "
+                                            "making progress you will be asked to report what you have.")
                 subs.append(sub)
                 sub.cancel = p.cancel
                 sub.is_subagent = True
@@ -917,7 +985,7 @@ class TaskTool(Tool):
             if not (report or "").strip():
                 status, detail = "failed", "no report"
             elif limited:
-                status, detail = "partial", f"ran out of steps · partial report ({len(report):,} chars)"
+                status, detail = "partial", f"stopped early · partial report ({len(report):,} chars)"
             else:
                 status, detail = "done", f"report ready ({len(report):,} chars)"
             report = report or "(sub-agent returned no report)"

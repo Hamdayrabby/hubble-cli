@@ -229,6 +229,15 @@ Everything is recorded locally in `~/.hubble/stats.jsonl`; `"stats": false` turn
   the rest of that task moves to strong, automatically.
 - Tiers can be on different providers (`provider:model`). `/stats` marks tasks that escalated with ↑.
 
+### How long a run may go
+
+There is no small fixed step limit (sub-agents doing a real audit can need 100+ tool calls). A run
+ends when the model is done, or when it stops making progress: the same tool call 3 times, or 6 steps
+in a row with nothing new. Edits and shell commands reset that check, so read → fix → re-run tests is
+fine. A sub-agent also stops at `subagent_token_budget` (2M tokens by default). A sub-agent that is
+stopped is asked for its report from what it found, so its work is never lost, and shows as ◐ partial.
+`max_turns` (100) and `subagent_max_turns` (150) remain as backstops against runaways.
+
 ## A team of models for sub-agents
 
 One goal can be split across several sub-agents, each on a different model, even on different

@@ -24,7 +24,9 @@ DEFAULTS: Dict[str, Any] = {
     "context_window": 128000,   # only a compaction-trigger estimate, not a hard cap the code enforces
     "context_window_auto": True,  # use the model's real size when the provider publishes one (e.g. OpenRouter)
     "auto_compact_ratio": 0.8,
-    "max_turns": 40,
+    "max_turns": 100,             # backstop only; runs also stop when they stop making progress
+    "subagent_max_turns": 150,    # backstop for sub-agents
+    "subagent_token_budget": 2000000,  # a sub-agent that has used this many tokens writes its report
     "permission_mode": "default",
     "persona": "code",
     "shell": "auto",
