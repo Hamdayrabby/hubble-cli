@@ -299,6 +299,128 @@ def space_scene(width: int, t: float = 2.4, art: _Art = FULL) -> Text:
     return _grid_text(grid).append("\n")
 
 
+# ----- retro arcade scene (Space Invaders style) ----------------------------
+#
+# Also a pure function of t: invaders march in discrete steps like the 1978 cabinet, the ship
+# glides and fires on a fixed rhythm, and which invaders are gone is replayed from the shots
+# fired so far in the current wave, so any frame can be drawn on its own.
+
+INVADERS = [  # (frame A, frame B, color); one row each, top to bottom
+    ("▞█▚", "▚█▞", "#ff5fd7"),
+    ("▛▀▜", "▙▄▟", "#00d7ff"),
+]
+SHIP = [" ▲ ", "▟█▙"]
+UFO = "<=●=>"
+
+
+class _Arcade:
+    height = 7          # UFO, 2 invader rows, 2 rows of open space, 2-row ship
+    width = 44          # smallest field that still looks like a formation
+    COLS = 8            # invaders per row
+    GAP = 5             # columns from one invader to the next
+    STEP = 0.45         # seconds per march step
+    SHOT_EVERY = 0.7
+    SHOT_SPEED = 14.0   # rows per second
+    WAVE = 14.0         # seconds before a fresh wave marches in
+
+    def field(self, width: int, left: int = 2) -> Tuple[int, int]:
+        """(left, field width) of the play area inside a grid `width` wide, starting at `left`."""
+        fw = max(self.width, min(width - left - 2, 72))
+        return left, fw
+
+    def _march(self, t: float, span: int) -> int:
+        """Formation x offset: steps right, then left, one column per STEP (triangle wave)."""
+        steps = int(t / self.STEP)
+        period = 2 * span
+        k = steps % period if period else 0
+        return k if k <= span else period - k
+
+    def _ship_x(self, t: float, fw: int) -> float:
+        return (fw - 3) / 2 + (fw - 5) / 2 * math.sin(t * 0.8) * 0.9
+
+    def state(self, t: float, fw: int):
+        """(offset, dead {(row, i)}, explosions [(row, col, age)], bullets [(y, x)], score)."""
+        wave_t = t % self.WAVE
+        wave_start = t - wave_t
+        formation = (self.COLS - 1) * self.GAP + 3
+        span = max(0, fw - formation)
+        dead, booms, bullets, score = set(), [], [], 0
+        n = int(wave_t / self.SHOT_EVERY)
+        for k in range(n + 1):
+            fired = wave_start + k * self.SHOT_EVERY
+            if fired > t:
+                break
+            x = int(round(self._ship_x(fired, fw))) + 1          # muzzle, middle of the ship
+            # Bullet leaves row 5 (ship tip) and climbs; invader rows are 1 and 2.
+            hit = None
+            for row in (1, 0):  # lowest invader row first, the one a bullet meets first
+                travel = (5 - (row + 1)) / self.SHOT_SPEED
+                at = fired + travel
+                off = self._march(at, span)
+                i, rem = divmod(x - off, self.GAP)
+                if 0 <= i < self.COLS and rem < 3 and (row, i) not in dead:
+                    hit = (row, i, at)
+                    break
+            if hit and hit[2] <= t:
+                row, i, at = hit
+                dead.add((row, i))
+                score += 30 if row == 0 else 20
+                if t - at < 0.35:
+                    booms.append((row + 1, self._march(at, span) + i * self.GAP + 1, t - at))
+            else:
+                y = 5 - (t - fired) * self.SHOT_SPEED
+                end = (hit[0] + 1) if hit else -1
+                if y > end:
+                    bullets.append((int(y), x))
+        total_score = int(t / self.WAVE) * 400 + score
+        return self._march(t, span), dead, booms, bullets, total_score
+
+    def draw(self, grid, top: int, t: float, left: int = 2):
+        width = len(grid[0])
+        left, fw = self.field(width, left)
+        fw = min(fw, width - left)
+
+        def put(r, c, ch, style):
+            if 0 <= top + r < len(grid) and 0 <= left + c < min(width, left + fw):
+                grid[top + r][left + c] = (ch, style)
+
+        off, dead, booms, bullets, score = self.state(t, fw)
+        frame = int(t / self.STEP) % 2
+        for j, ch in enumerate(f"SCORE {score:05d}"):
+            put(0, j, ch, "#5fd787")
+        hi = "HI 09990"
+        for j, ch in enumerate(hi):
+            put(0, fw - len(hi) + j, ch, "#878787")
+        # Mothership crosses the top every so often (over the score, like the real thing).
+        ut = t % 9.0
+        if ut < 3.0:
+            ux = int((fw + len(UFO)) * ut / 3.0) - len(UFO)
+            for j, ch in enumerate(UFO):
+                put(0, ux + j, ch, "bold #ff5f5f" if ch == "●" and int(t * 8) % 2 else "#ff8787")
+        for row, (a, b, color) in enumerate(INVADERS):
+            sprite = a if frame == 0 else b
+            for i in range(self.COLS):
+                if (row, i) in dead:
+                    continue
+                for j, ch in enumerate(sprite):
+                    put(row + 1, off + i * self.GAP + j, ch, color)
+        for r, c, age in booms:
+            ch = "✶" if age < 0.12 else "✷" if age < 0.24 else "·"
+            for dc, g in ((-1, "╲"), (0, ch), (1, "╱")):
+                put(r, c + dc, g if age < 0.24 else " " if dc else ch, "bold #ffd75f")
+        for y, x in bullets:
+            if 0 <= y <= 5:
+                put(y, x, "│", "bold #ffffaf")
+        sx = int(round(self._ship_x(t, fw)))
+        for r, line in enumerate(SHIP):
+            for j, ch in enumerate(line):
+                if ch != " ":
+                    put(5 + r, sx + j, ch, "bold #5fff87" if ch == "▲" else "#00d75f")
+
+
+ARCADE = _Arcade()
+
+
 # ----- composed home screen -------------------------------------------------
 
 _MEASURE = Console(width=400, color_system="truecolor", force_terminal=True, legacy_windows=False,
@@ -438,37 +560,43 @@ def compose_grid(width: int, height: int, t: float, status: List[Text], tips: Li
     Picks the richest layout that fits `height` rows, dropping tips, then shrinking the scene,
     then the logo, so it also works in short terminals such as VS Code's panel.
     """
-    width = max(40, min(width - 1, 110))
+    width = max(40, min(width - 1, 132))
     height = max(height, 1)
     # Logo sizes: 2 = large pixel letters, 1 = block letters, 0 = one-line wordmark.
     logo_h = {2: 9, 1: 7, 0: 1}  # letter rows + shadow row + tagline
     top = 2 if width >= BIG_LOGO_WIDTH + 4 else (1 if width >= 58 else 0)
     mid = min(top, 1)
-    # Richest to poorest. The name is the last thing to shrink: first drop the scene, then the
-    # tips, then status lines, and only then fall back to a smaller logo.
+    # Wide terminal: the arcade game plays beside the big logo, costing no rows at all.
+    side_left = 2 + BIG_LOGO_WIDTH + 3
+    side = top == 2 and width - side_left - 1 >= ARCADE.width
+    # Richest to poorest: big name first, then the game, then tips, then status lines.
     n_status = len(status)
     layouts = []
     for cand_size in dict.fromkeys([top, mid, 0]):
-        for cand_art in (FULL, COMPACT, None):
-            layouts.append((cand_size, cand_art, True, n_status))
-        for cand_art in (COMPACT, None):
-            layouts.append((cand_size, cand_art, False, n_status))
+        game = "side" if side and cand_size == 2 else ARCADE
+        for cand_art, cand_tips in ((game, True), (game, False), (None, True), (None, False)):
+            layouts.append((cand_size, cand_art, cand_tips, n_status))
         for n in (min(2, n_status), min(1, n_status), 0):
-            layouts.append((cand_size, None, False, n))
+            layouts.append((cand_size, "side" if game == "side" else None, False, n))
     size, art, with_tips, n_status = layouts[-1]
+
+    def art_rows(a):
+        return a.height + 1 if a is not None and a != "side" else 0
+
     for cand_size, cand_art, cand_tips, cand_n in layouts:
-        if cand_art is not None and width < cand_art.width + 24:
+        if cand_art is ARCADE and width < ARCADE.width + 4:
             continue
-        need = logo_h[cand_size] + 1 + (cand_art.height + 1 if cand_art else 0) + cand_n + \
-            (1 + len(tips) if cand_tips else 0) + 1
+        need = logo_h[cand_size] + 1 + art_rows(cand_art) + cand_n + (1 + len(tips) if cand_tips else 0) + 1
         if need <= height:
             size, art, with_tips, n_status = cand_size, cand_art, cand_tips, cand_n
             break
     status = status[:n_status]
     use_big = size > 0
     logo_h = logo_h[size]
+    if art != "side" and use_big:
+        width = min(width, 110)  # without the game beside it, keep the old, calmer width
 
-    rows_total = logo_h + 1 + (art.height + 1 if art else 0) + len(status) + (1 + len(tips) if with_tips else 0) + 1
+    rows_total = logo_h + 1 + art_rows(art) + len(status) + (1 + len(tips) if with_tips else 0) + 1
     rows_total = min(rows_total, height) if rows_total > height else rows_total  # never exceed the budget
     grid = _new_grid(width, max(rows_total, 1))
     _draw_stars(grid, t)
@@ -488,9 +616,14 @@ def compose_grid(width: int, height: int, t: float, status: List[Text], tips: Li
                                                     ("   v" + version, "dim")))
     else:
         _stamp_text(grid, row, 2, Text.assemble(small_logo(), ("  v" + version, "dim")))
+    if art == "side":
+        ARCADE.draw(grid, 0, t, left=side_left)
     row += logo_h + 1
 
-    if art is not None:
+    if art is ARCADE:
+        ARCADE.draw(grid, row, t)
+        row += ARCADE.height + 1
+    elif isinstance(art, _Art):
         _draw_comet(grid, row, t)
         _draw_scene(grid, row, t, art)
         row += art.height + 1

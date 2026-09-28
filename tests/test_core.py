@@ -457,6 +457,39 @@ def test_parallel_subagents(tmp_path):
     assert agent.provider.max_active == 2 and elapsed < 0.95, elapsed
 
 
+def test_arcade_scene_plays_and_is_deterministic():
+    from hubble.banner import ARCADE, _new_grid
+
+    def frame(t, width=60):
+        grid = _new_grid(width, ARCADE.height)
+        ARCADE.draw(grid, 0, t)
+        return ["".join(c for c, _ in row) for row in grid]
+
+    fw = ARCADE.field(60)[1]
+    start = frame(0.01)
+    assert start[1].count("▞█▚") + start[1].count("▚█▞") == ARCADE.COLS  # full wave at the start
+    assert "▲" in start[5] and "▟█▙" in start[6]
+    later_off, dead, _, _, score = ARCADE.state(10.0, fw)
+    assert dead and score > 0                     # the ship has shot some invaders by now
+    assert frame(3.3) == frame(3.3)               # pure function of t
+    assert frame(0.1) != frame(0.1 + ARCADE.STEP)  # marching / 2-frame animation
+    _, dead_new_wave, _, _, _ = ARCADE.state(ARCADE.WAVE + 0.01, fw)
+    assert not dead_new_wave                      # fresh wave
+    assert all(len(r) == 60 for r in frame(7.7))
+
+
+def test_arcade_goes_beside_big_logo_when_wide():
+    from hubble.banner import compose_grid, home_info_lines
+    st, tips = home_info_lines(version="4", provider="h", model="m", mode="default", root="x", session_id=None,
+                               memory_files=[], model_count=5, provider_count=1, resumable=0, show_provider=False)
+    wide = compose_grid(130, 16, 1.0, st, tips, "4")
+    assert "SCORE" in "".join(c for c, _ in wide[0])        # same rows as the logo: no extra height
+    assert "██" in "".join(c for c, _ in wide[0])
+    narrow = compose_grid(100, 30, 1.0, st, tips, "4")
+    assert not any("SCORE" in "".join(c for c, _ in r) for r in narrow[:9])
+    assert any("SCORE" in "".join(c for c, _ in r) for r in narrow)  # stacked below the logo
+
+
 def test_visuals_render_at_any_width():
     import io
     import time as _t
@@ -469,7 +502,7 @@ def test_visuals_render_at_any_width():
                     memory_files=[], model_count=3, provider_count=1, resumable=0, show_provider=False)
         out = con.file.getvalue()
         assert "Tips for getting started" in out
-        assert ("H U B B L E" in out) == (width >= 64)
+        assert ("SCORE" in out) == (width >= 64)  # the arcade scene, where there is room for it
     from hubble.banner import COMPACT, FULL, pick_art
     for art in (FULL, COMPACT):
         for tt in (0.0, 1.3, 2.4, 5.1):
