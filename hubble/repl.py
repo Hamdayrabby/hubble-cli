@@ -96,6 +96,8 @@ class Repl:
         self._home = None               # home screen (status, tips) while the first prompt is showing
         self._pending_images: List[Path] = []  # pasted from the clipboard, sent with the next message
         self._main_root: Optional[Path] = None  # set once /worktree moves the tools elsewhere
+        from hubble.update import UpdateChecker
+        self.updates = UpdateChecker(enabled=bool(agent.settings.get("update_check", True)))
         self.turn_stats = None
         self.agent = agent
         agent.fallback_resolver = self.fallback_for
@@ -261,6 +263,12 @@ class Repl:
         """Called on every prompt redraw (at least once a second): keep the home screen's model
         line in step with the running scan, and report a finished scan right away instead of
         waiting for the next Enter."""
+        if self.updates.latest and not self.updates.announced:
+            try:
+                from prompt_toolkit.application import get_app, run_in_terminal
+                get_app().loop.call_soon(lambda: run_in_terminal(self._announce_update))
+            except Exception:
+                pass  # not inside a prompt; the main loop shows it before the next one
         key = tuple((n, s.status, s.done, s.retry_done) for n, s in self.scanners.items())
         if key == self._scan_key:
             return
@@ -398,6 +406,11 @@ class Repl:
                           "(progress in the bottom bar)...[/dim]")
         return True
 
+    def _announce_update(self):
+        notice = self.updates.pending_notice()
+        if notice:
+            console.print(f"[bold yellow]⬆ {escape(notice)}[/bold yellow]")
+
     def _announce_scans(self):
         for name in list(self._unannounced):
             scanner = self.scanners.get(name)
@@ -431,6 +444,7 @@ class Repl:
         self.agent.start_session("resume" if self.agent.messages else "startup")
         self.banner()
         self._refresh_stale_scans()
+        self.updates.start()
         session = self._prompt_session()
         if initial_prompt:
             self._home = None
@@ -438,6 +452,7 @@ class Repl:
         while True:
             try:
                 self._announce_scans()
+                self._announce_update()
                 if self._home is not None:
                     # Animated home screen lives in the prompt until the first message is sent;
                     # the last frame stays in the scrollback.

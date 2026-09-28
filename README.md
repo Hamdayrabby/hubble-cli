@@ -12,6 +12,9 @@ pipx install hubble-cli
 ```
 (or `pip install --user hubble-cli`; the latest unreleased code: `pipx install git+https://github.com/Hamdayrabby/hubble-cli.git`)
 
+Upgrade with `pipx upgrade hubble-cli` (or `pip install -U hubble-cli`). Hubble tells you when a new
+version is out — it checks PyPI at most once a day; set `"update_check": false` to turn that off.
+
 Then just run it from any project:
 
 ```bash

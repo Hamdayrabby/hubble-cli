@@ -47,6 +47,7 @@ DEFAULTS: Dict[str, Any] = {
     "web_tools": True,
     "web_search": {"engine": "auto"},
     "home_animation": True,
+    "update_check": True,  # tell me when a newer hubble-cli is on PyPI (checked at most once a day)
     "permissions": {"allow": [], "deny": []},
 }
 

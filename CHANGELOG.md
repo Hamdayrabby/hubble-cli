@@ -23,6 +23,9 @@
 - GitHub integration: `/install-github` sets up PR reviews and `@hubble` mentions in Actions
   (`hubble -p --github`).
 - `--output-format stream-json` for headless runs; `HUBBLE_MODEL` environment variable.
+- New-version notice: the REPL tells you when a newer hubble-cli is on PyPI (checked at most once a
+  day; `"update_check": false` or `HUBBLE_NO_UPDATE_CHECK=1` turns it off).
+- Requests identify themselves as `User-Agent: hubble-cli/<version>`.
 - Context window is taken from the provider when it publishes one (e.g. OpenRouter).
 
 **Fixes**
