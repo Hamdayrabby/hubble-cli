@@ -316,6 +316,18 @@ class ReplEvents(Events):
 
     def ask(self, tool: Tool, args: Dict[str, Any], preview: Optional[str]) -> Tuple[str, str]:
         self._stop_status()
+        # An edit sub-agent asks while its board is live: pause the board so it doesn't redraw
+        # over the question, and bring it back afterwards.
+        paused = self.board_live is not None
+        if paused:
+            self.board_live.stop()
+        try:
+            return self._ask(tool, args, preview)
+        finally:
+            if paused and self.board_live is not None:
+                self.board_live.start()
+
+    def _ask(self, tool: Tool, args: Dict[str, Any], preview: Optional[str]) -> Tuple[str, str]:
         label = TOOL_LABELS.get(tool.name, tool.name)
         title = f"{label} {describe_call(tool, args)}"
         if tool.kind == "exec":
@@ -328,9 +340,28 @@ class ReplEvents(Events):
             body = Text(preview or "", style="dim")
         console.print(Panel(body, title=f"[bold yellow]{escape(title[:100])}[/bold yellow]",
                             title_align="left", border_style="yellow"))
-        always = {"edit": "edits this session", "web": f"{tool.target(args)} this session"}.get(
-            tool.kind, "similar commands this session")
-        console.print(f"  [bold]y[/bold] yes   [bold]a[/bold] always ({always})   "
+        always = {"edit": "edits", "web": tool.target(args), "mcp": tool.target(args)}.get(
+            tool.kind, _command_family(args.get("command", "")))
+        question = {"exec": "Run this command?", "edit": "Make this change?", "web": "Fetch this page?"}.get(
+            tool.kind, f"Allow {label}?")
+        if sys.stdin.isatty() and console.is_terminal:
+            choice = choose(question, ["Yes", f"Yes, and don't ask again for {always} this session",
+                                       "No, and tell the model what to do instead"], esc_index=2)
+            if choice is None:
+                raise KeyboardInterrupt  # Ctrl+C: stop the whole turn
+            if choice == 0:
+                self.approved_diff_shown = True
+                console.print("  [green]✔[/green] [dim]allowed[/dim]")
+                return "yes", ""
+            if choice == 1:
+                self.approved_diff_shown = True
+                console.print(f"  [green]✔[/green] [dim]allowed; won't ask again for {escape(always)} this session[/dim]")
+                return "always", ""
+            feedback = ask_line("  Tell the model what to do instead (Enter to just say no): ")
+            console.print("  [red]✘[/red] [dim]denied" + (f": {escape(feedback)}" if feedback else "") + "[/dim]")
+            return "no", feedback
+        # Not an interactive terminal (piped input): the plain typed answer.
+        console.print(f"  [bold]y[/bold] yes   [bold]a[/bold] always ({escape(always)} this session)   "
                       f"[bold]n[/bold] no, tell the model why   [dim]Ctrl+C stop[/dim]")
         while True:
             try:
@@ -463,6 +494,104 @@ class StreamJsonEvents(HeadlessEvents):
         self.emit({"type": "notice", "level": "warn",
                    "message": f"denied (needs approval): {tool.name} {describe_call(tool, args)}"})
         return super().ask(tool, args, preview)
+
+
+def _command_family(command: str) -> str:
+    """How 'always' is described for a shell command: its prefix, e.g. `pytest` or `git status`."""
+    from hubble.permissions import SAFE_COMMAND, command_prefix
+    prefix = command_prefix(command)
+    if not prefix or not SAFE_COMMAND.match(command.strip()):
+        return "this exact command"  # chained/complex commands are only ever remembered verbatim
+    return f"`{prefix}` commands"
+
+
+def choose(question: str, options: List[str], esc_index: Optional[int] = None) -> Optional[int]:
+    """A small inline menu like other agent CLIs:
+
+         Run this command?
+       ❯ 1. Yes
+         2. Yes, and don't ask again for `pytest` commands this session
+         3. No, and tell the model what to do instead  (esc)
+
+    ↑/↓ then Enter, or press the number to answer at once. Esc picks `esc_index`; Ctrl+C returns
+    None (the caller treats it as "stop the turn")."""
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.formatted_text import FormattedText
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+
+    state = {"idx": 0}
+
+    def render():
+        out = [("bold", f" {question}\n")]
+        for i, opt in enumerate(options):
+            sel = i == state["idx"]
+            out.append(("fg:#00d7ff bold" if sel else "", f" {'❯' if sel else ' '} {i + 1}. {opt}"))
+            out.append(("fg:ansigray", "  (esc)\n" if i == esc_index else "\n"))
+        out.append(("fg:ansigray", "   ↑↓ move · Enter or 1-9 choose · Ctrl+C stop the turn"))
+        return FormattedText(out)
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    @kb.add("c-p")
+    def _(event):
+        state["idx"] = (state["idx"] - 1) % len(options)
+
+    @kb.add("down")
+    @kb.add("c-n")
+    @kb.add("tab")
+    def _(event):
+        state["idx"] = (state["idx"] + 1) % len(options)
+
+    @kb.add("enter")
+    def _(event):
+        event.app.exit(result=state["idx"])
+
+    for n in range(1, min(len(options), 9) + 1):
+        @kb.add(str(n))
+        def _(event, n=n):
+            event.app.exit(result=n - 1)
+
+    for key, letter_idx in (("y", 0), ("a", 1), ("n", 2)):  # the old one-letter answers still work
+        if letter_idx < len(options):
+            @kb.add(key)
+            def _(event, i=letter_idx):
+                event.app.exit(result=i)
+
+    @kb.add("escape", eager=True)
+    def _(event):
+        event.app.exit(result=esc_index)
+
+    @kb.add("c-c")
+    def _(event):
+        event.app.exit(result=None)
+
+    app = Application(layout=Layout(Window(FormattedTextControl(render, focusable=True),
+                                           dont_extend_height=True)),
+                      key_bindings=kb, full_screen=False, erase_when_done=True, mouse_support=False)
+    try:
+        return app.run()
+    except (EOFError, KeyboardInterrupt):
+        return None
+
+
+def ask_line(message: str) -> str:
+    """One line of free text (for 'tell the model what to do instead'). Esc/Ctrl+C = empty."""
+    from prompt_toolkit import prompt
+    from prompt_toolkit.formatted_text import HTML
+    from prompt_toolkit.key_binding import KeyBindings
+    kb = KeyBindings()
+
+    @kb.add("escape", eager=True)
+    def _(event):
+        event.app.exit(result="")
+
+    try:
+        return (prompt(HTML(f"<ansigray>{message}</ansigray>"), key_bindings=kb) or "").strip()
+    except (EOFError, KeyboardInterrupt):
+        return ""
 
 
 def pick(title: str, items: List[Tuple[Any, str, str]], current: Any = None, max_visible: int = 14) -> Any:

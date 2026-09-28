@@ -31,6 +31,7 @@
   chat-only deployments (e.g. a vLLM server without `--enable-auto-tool-choice`) and non-chat models
   (parse, embed, rerank, guard, …) are skipped; a model that fails with "tool choice requires …"
   mid-run is remembered and the next fallback is tried. The picker marks such models "no tools".
+- **Approval prompts are a menu**, like other agent CLIs: 1 Yes / 2 Yes, and don't ask again for X this session / 3 No, and tell the model what to do instead. Arrow keys + Enter, or press the number; Esc = no, Ctrl+C stops the turn. The old y/a/n keys still work, and piped input keeps the typed prompt.
 - **Sub-agents always report:** a sub-agent that has to stop is asked for a final report from what it
   found instead of returning nothing (or, if the model still won't write one, the list of what it
   read). Such runs show as ◐ partial, not ✔.
