@@ -111,7 +111,10 @@ class OpenAICompatProvider:
 
     @property
     def headers(self) -> Dict[str, str]:
-        return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        # An honest, stable client name, so gateways that allowlist clients can recognize Hubble.
+        from hubble import __version__
+        return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json",
+                "User-Agent": f"hubble-cli/{__version__} (+https://github.com/Hamdayrabby/hubble-cli)"}
 
     def stream(self, model: str, messages: List[Dict[str, Any]], tools: Optional[List[Dict]] = None,
                temperature: float = 0.3, max_tokens: int = 8192,
