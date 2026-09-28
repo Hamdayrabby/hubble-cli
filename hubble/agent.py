@@ -96,7 +96,8 @@ class Agent:
                  permissions: Permissions, events: Events, session: Optional[Session] = None,
                  tools: Optional[List[Tool]] = None, system_override: Optional[str] = None):
         self.provider = provider
-        self.provider_name: str = settings.get("provider") or "hubble"
+        from hubble.providers import normalize_provider_name
+        self.provider_name: str = normalize_provider_name(settings.get("provider"))
         self.fallback_client: Optional[OpenAICompatProvider] = provider
         # (provider_name, model) -> (client, fallback_model) or None; set by the REPL/headless runner.
         self.fallback_resolver = None

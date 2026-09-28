@@ -17,7 +17,7 @@ from hubble.tools import ToolContext, detect_shell
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="hubble", description="Hubble: agentic coding CLI for AIHub and other OpenAI-compatible APIs.",
+        prog="hubble", description="Hubble: agentic coding CLI for OpenAI-compatible APIs, Claude, and local LLMs.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
   hubble                                  start an interactive session
@@ -110,9 +110,9 @@ def main(argv=None):
     except ConfigError as e:
         sys.exit(f"hubble: {e}")
 
-    from hubble.providers import DEFAULT_PROVIDER, load_providers
+    from hubble.providers import DEFAULT_PROVIDER, load_providers, normalize_provider_name
     providers = load_providers(settings)
-    active = args.provider or settings.get("provider") or DEFAULT_PROVIDER
+    active = normalize_provider_name(args.provider or settings.get("provider"))
     if args.api_key or args.base_url:
         active = DEFAULT_PROVIDER  # explicit credentials on the command line win
     if active not in providers:

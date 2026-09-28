@@ -413,7 +413,9 @@ def test_provider_registry(tmp_path, monkeypatch):
     pv.save_provider(pv.ProviderConfig("groq", "https://api.groq.com/openai/v1", "k1"))
     pv.save_listing("groq", "https://api.groq.com/openai/v1", ["llama-a", "llama-b"])
     provs = pv.load_providers({"api_key": "main", "base_url": "https://aihub.071129.xyz/v1"})
-    assert list(provs) == ["hubble", "groq"] and provs["groq"].api_key == "k1"
+    assert list(provs) == ["aihub", "groq"] and provs["groq"].api_key == "k1"  # built-in = the AIHub gateway
+    assert pv.normalize_provider_name("hubble") == "aihub"   # name used up to 4.1, still recognized
+    assert pv.normalize_provider_name(None) == "aihub" and pv.normalize_provider_name("groq") == "groq"
     models = pv.provider_models("groq")
     assert [(m["model"], m["available"]) for m in models] == [("llama-a", None), ("llama-b", None)]
     assert pv.remove_provider("groq") and "groq" not in pv.load_providers({})
@@ -559,21 +561,23 @@ def test_subagent_board_tracks_progress(tmp_path):
 def test_resolve_fallback_stays_on_provider(tmp_path, monkeypatch):
     import hubble.providers as pv
     listings = {
-        "hubble": [{"model": "codestral-latest", "available": True, "latency_ms": 700}],
+        "aihub": [{"model": "codestral-latest", "available": True, "latency_ms": 700}],
         "hcnsec": [{"model": "DeepSeek-V4.1-Flash", "available": True, "latency_ms": 900},
                    {"model": "qwen-fast", "available": True, "latency_ms": 400},
                    {"model": "broken", "available": False, "latency_ms": None}],
         "lonely": [{"model": "only-one", "available": True, "latency_ms": 500}],
     }
     monkeypatch.setattr(pv, "provider_models", lambda name: listings.get(name, []))
-    provs = {"hubble": 1, "hcnsec": 1, "lonely": 1}
+    provs = {"aihub": 1, "hcnsec": 1, "lonely": 1}
     s = {"fallback_model": "codestral-latest"}
     # hcnsec has no codestral: use its fastest verified model, not codestral on hcnsec.
     assert pv.resolve_fallback(s, provs, "hcnsec", "DeepSeek-V4.1-Flash") == ("hcnsec", "qwen-fast")
-    # hubble (the built-in provider) has codestral itself.
-    assert pv.resolve_fallback(s, provs, "hubble", "other") == ("hubble", "codestral-latest")
-    # nothing else on this provider: route codestral through the built-in hubble provider.
-    assert pv.resolve_fallback(s, provs, "lonely", "only-one") == ("hubble", "codestral-latest")
+    # aihub (the built-in provider) has codestral itself.
+    assert pv.resolve_fallback(s, provs, "aihub", "other") == ("aihub", "codestral-latest")
+    # nothing else on this provider: route codestral through the built-in aihub provider.
+    assert pv.resolve_fallback(s, provs, "lonely", "only-one") == ("aihub", "codestral-latest")
+    # a /fallback choice saved under the old name "hubble" still applies to the built-in provider.
+    assert pv.resolve_fallback({**s, "fallback_models": {"hubble": "qwen"}}, provs, "aihub", "x") == ("aihub", "qwen")
     # explicit per-provider choice and off switch.
     assert pv.resolve_fallback({**s, "fallback_models": {"hcnsec": "broken2"}}, provs, "hcnsec", "x") == ("hcnsec", "broken2")
     assert pv.resolve_fallback({**s, "fallback_models": {"hcnsec": "off"}}, provs, "hcnsec", "x") is None

@@ -351,7 +351,7 @@ Extra providers are stored in `~/.hubble/providers.json`. Their API keys go to y
 (Windows Credential Manager, macOS Keychain, or Secret Service on Linux); only where no credential store
 exists (headless Linux, containers) are they written into that file in plain text. `/provider secure` moves
 keys saved by older versions into the credential store.
-Their model lists are stored in `~/.hubble/models/<name>.json`. When a model is rate limited or down, Hubble retries that request with a fallback that the current provider actually has, in this order: the fallback you picked with `/fallback`, then `fallback_model` if the provider has it, then the provider's fastest verified model, then `fallback_model` on the built-in hubble provider. Sub-agents use the same route. `/fallback off` disables it for a provider.
+Their model lists are stored in `~/.hubble/models/<name>.json`. When a model is rate limited or down, Hubble retries that request with a fallback that the current provider actually has, in this order: the fallback you picked with `/fallback`, then `fallback_model` if the provider has it, then the provider's fastest verified model, then `fallback_model` on the built-in `aihub` provider. Sub-agents use the same route. `/fallback off` disables it for a provider.
 
 ## Project memory
 
