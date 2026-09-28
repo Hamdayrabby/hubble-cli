@@ -271,7 +271,29 @@ class Repl:
         except Exception:
             width = 80
         rule = f"<tb.rule>{'─' * max(0, width - 1)}</tb.rule>"
-        return HTML(rule + "\n  " + self.SEP.join(parts) + "\n  " + self._stats_line())
+        # Status items wrap whole onto the next line when they don't fit (never split mid-item);
+        # the token/speed stats always keep a line of their own.
+        lines = self._pack(parts, width - 3)
+        self._toolbar_height = 2 + len(lines)  # rule + status lines + stats line
+        return HTML(rule + "".join("\n  " + line for line in lines) + "\n  " + self._stats_line())
+
+    @classmethod
+    def _pack(cls, parts: List[str], width: int) -> List[str]:
+        def visible(markup: str) -> int:
+            text = re.sub(r"<[^>]+>", "", markup)
+            return len(text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&"))
+
+        sep_w = visible(cls.SEP)
+        lines: List[List[str]] = [[]]
+        used = 0
+        for part in parts:
+            w = visible(part)
+            if lines[-1] and used + sep_w + w > width:
+                lines.append([])
+                used = 0
+            used += (sep_w if lines[-1] else 0) + w
+            lines[-1].append(part)
+        return [cls.SEP.join(line) for line in lines]
 
     TOOLBAR_STYLE = {
         # No reverse-video bar: the toolbar sits on the terminal's own background.
@@ -367,8 +389,9 @@ class Repl:
             typed = app.current_buffer.text
         except Exception:
             return HTML("<ansicyan><b>❯</b></ansicyan> ")
-        # Leave room for the prompt line and the 3-line toolbar, plus the completion menu while typing / or @.
-        budget = size.rows - 5 - (10 if typed[:1] in ("/", "@") or " @" in typed else 0)
+        # Leave room for the prompt line and the toolbar (3+ lines), plus the completion menu while typing / or @.
+        toolbar = getattr(self, "_toolbar_height", 3)
+        budget = size.rows - 2 - toolbar - (10 if typed[:1] in ("/", "@") or " @" in typed else 0)
         # prompt_toolkit asks for the message several times per redraw (measure, then draw);
         # build each frame once per 1/30 s tick and reuse it.
         elapsed = time.time() - self._home_t0

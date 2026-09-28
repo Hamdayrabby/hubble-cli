@@ -111,6 +111,21 @@ def test_newer_version_announced_once_without_redraw_loop(tmp_path):
     assert repl.updates.announced
 
 
+def test_toolbar_items_wrap_whole_and_stats_keep_own_line():
+    from hubble.repl import Repl
+    parts = ["<tb.val>aihub nvidia/nemotron-3-super-120b-a12b</tb.val>", "default shift+tab", "persona code",
+             "context 2%", "checking aihub retry 9/77", "checking hcnsec retry 1/8"]
+    wide = Repl._pack(parts, 300)
+    assert len(wide) == 1
+    narrow = Repl._pack(parts, 100)
+    assert len(narrow) == 2
+    for line in narrow:
+        plain = line.replace("<tb.sep>", "").replace("</tb.sep>", "")
+        assert not plain.rstrip().endswith("·") and len(__import__("re").sub(r"<[^>]+>", "", line)) <= 100
+    assert "checking hcnsec retry 1/8" in narrow[1]           # moved whole, not split
+    assert Repl._pack(["x" * 150], 100) == ["x" * 150]         # an item wider than the line stays one item
+
+
 def test_network_failure_is_silent(monkeypatch, tmp_path):
     monkeypatch.setattr(update, "CACHE_FILE", tmp_path / "c.json")
     monkeypatch.setattr(update, "_fetch_latest", lambda timeout=4.0: None)
