@@ -889,7 +889,8 @@ class TaskTool(Tool):
                               shell_argv=ctx.shell_argv, shell_timeout=ctx.shell_timeout,
                               sandbox=ctx.sandbox, sandbox_image=ctx.sandbox_image,
                               sandbox_memory=ctx.sandbox_memory, sandbox_cpus=ctx.sandbox_cpus,
-                              sandbox_network=ctx.sandbox_network, sandbox_writable=ctx.sandbox_writable)
+                              sandbox_network=ctx.sandbox_network, sandbox_writable=ctx.sandbox_writable,
+                              allow_unsandboxed=ctx.allow_unsandboxed)
         if edit:
             # Full toolset except task/write_skill: an edit sub-agent does its own assigned job,
             # it does not spawn further sub-agents or rewrite the project's skills.

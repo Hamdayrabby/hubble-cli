@@ -80,6 +80,7 @@ class ToolContext:
     sandbox_cpus: str = "2"
     sandbox_network: bool = True
     sandbox_writable: List[Path] = field(default_factory=list)  # extra writable dirs for the native sandbox
+    allow_unsandboxed: bool = True  # False on a server: `unsandboxed: true` shell calls are refused
     read_mtimes: Dict[str, float] = field(default_factory=dict)
     todos: List[Dict[str, str]] = field(default_factory=list)
     # One dict per agent turn: absolute path -> original bytes (None if the file did not exist).
@@ -427,6 +428,9 @@ class Shell(Tool):
         from hubble.sandbox import effective_mode
         cmd = args["command"]
         timeout = max(1, min(int(args.get("timeout") or ctx.shell_timeout), 600))
+        if args.get("unsandboxed") and not ctx.allow_unsandboxed:
+            raise ToolError("Running outside the sandbox is disabled here. Run the command inside the "
+                            "sandbox, or do the work without it.")
         mode = "off" if args.get("unsandboxed") else effective_mode(ctx.sandbox)
         if mode == "docker":
             return self._run_docker(cmd, timeout, ctx)
