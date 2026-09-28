@@ -241,7 +241,10 @@ providers. Pick the team once:
 The main model sees this list (with each model's recent success rate and speed from `/stats`) and gives
 each `task` the model that suits its part: several research sub-agents on fast models in parallel, a
 strong one for the risky change or the final review. Steer it in plain words ("search with the fast
-model, review with opus"). Each running sub-agent shows its model next to its name. A `task` can also
+model, review with opus"). If the main model doesn't pick one, Hubble does: a team member noted as
+fast/search for research, careful/review for edits. If a sub-agent's model fails (down, rate limited,
+a bad model id), it is retried on the next team model, as long as that is safe: research tasks, or edit
+tasks that haven't changed anything yet. Each running sub-agent shows its model next to its name. A `task` can also
 name any `provider:model` directly, and a custom agent file can pin one (`model: anthropic:claude-opus-5`).
 
 ## Custom agents
@@ -356,7 +359,8 @@ Allow rules never apply to chained commands (`&&`, `;`, `|`, redirects), so `she
 | `!cmd` | Run a shell command yourself |
 | `#note` | Append a note to `./HUBBLE.md` |
 | Esc+Enter / Ctrl+J | New line |
-| Ctrl+C / Ctrl+D | Cancel turn / quit |
+| Ctrl+C | Stop the current turn at once (model, tool or shell command); at the prompt, clear the line, or press twice on an empty line to quit |
+| Ctrl+D | Quit |
 
 **Custom commands:** `.hubble/commands/<name>.md` (project) or `~/.hubble/commands/<name>.md` (user) becomes
 `/<name>`. `$ARGUMENTS` is replaced by the text after the command.

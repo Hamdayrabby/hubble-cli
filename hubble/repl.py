@@ -101,6 +101,7 @@ class Repl:
         from hubble.update import UpdateChecker
         self.updates = UpdateChecker(enabled=bool(agent.settings.get("update_check", True)))
         self._update_scheduled = False
+        self._last_ctrl_c = 0.0
         self.turn_stats = None
         self.agent = agent
         agent.fallback_resolver = self.fallback_for

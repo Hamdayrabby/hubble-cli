@@ -11,7 +11,13 @@
 - **Sub-agent model team:** `/team add <provider:model> [what it is for]` builds a list the main model
   picks from per sub-agent, with each model's recent record from `/stats`. Sub-agents (and custom
   agent files) can now run on any configured provider (`provider:model`), several at once in
-  parallel, each labelled with its model.
+  parallel, each labelled with its model. When the main model does not choose, a team member is
+  picked by job (a fast/search one for research, a careful/review one for edits); a sub-agent whose
+  model fails is retried on the next team model (research tasks, or edits that have not acted yet).
+- **Ctrl+C works right away:** on Windows it used to wait until a slow or stalled model sent its
+  next chunk, or a long shell command ended (a 20 s stall took 20 s to interrupt; now ~0.1 s).
+  Ctrl+C with text typed clears the line; twice on an empty prompt exits.
+- A spurious HTTP 401 from a gateway is retried once.
 
 ## 4.2.0
 

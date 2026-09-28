@@ -797,44 +797,70 @@ class TaskTool(Tool):
         label = args.get("description") or (spec.name if spec else "task")
         if spec:
             label = f"{spec.name}: {label}"
-        # Model, in order: the one this call asks for, the agent definition's, the fast routing tier
-        # for research, else the parent's own. Any of them may be "provider:model".
+        # Models to try, in order: the one this call asks for, else the agent definition's, else a
+        # team member that suits the job, else (research) the fast routing tier, else the parent's
+        # own. Then, if that model fails outright, the other team members. "provider:model" works.
         from hubble.router import parse_spec, routing_config
-        choice = args.get("model") or (spec.model if spec else "")
+        choice = args.get("model") or (spec.model if spec else "") or pick_team_model(p.settings, edit)
         if not choice and not edit:
             cfg = routing_config(p.settings)
             choice = cfg["fast"] if cfg else ""
-        prov, model = parse_spec(choice, p.provider_name) if choice else (p.provider_name, p.model)
-        client = p.provider if prov == p.provider_name else (p.client_for(prov) if p.client_for else None)
-        note = ""
-        if client is None:
-            note = f" (provider '{prov}' is not configured; used {p.model})"
-            prov, model, client = p.provider_name, p.model, p.provider
-        if (prov, model) != (p.provider_name, p.model):
-            label = f"{label} · {model}"
+        candidates = [parse_spec(choice, p.provider_name) if choice else (p.provider_name, p.model)]
+        for alt in team_specs(p.settings):
+            pm = parse_spec(alt, p.provider_name)
+            if pm not in candidates:
+                candidates.append(pm)
+        if (p.provider_name, p.model) not in candidates:
+            candidates.append((p.provider_name, p.model))
+        candidates = candidates[:3]  # the first choice plus at most two retries
+
         key = f"task-{next(_task_ids)}"
+        base_label = label
+        first = candidates[0]
+        if first != (p.provider_name, p.model):
+            label = f"{base_label} · {first[1]}"
         p.events.subagent_start(key, label)
-        sub = Agent(client, {**p.settings, "model": model, "max_turns": 30 if edit else 20,
-                             "auto_compact_ratio": 0},
-                    sub_ctx, perms, _SubagentEvents(p.events, label, key), tools=tools, system_override=system)
-        sub.cancel = p.cancel
-        sub.is_subagent = True
-        sub.provider_name = prov
-        sub.fallback_client = p.fallback_client
-        sub.fallback_resolver = p.fallback_resolver
-        sub.stats_log = p.stats_log
-        sub.client_for = p.client_for
-        if note:
-            p.events.notice(f"  ↳ {label}{note}", "warn")
         status, detail = "failed", "crashed"
+        subs: List[Agent] = []
         try:
-            report = sub.run(args["prompt"])
-            if sub.last_stats.interrupted:
-                status, detail = "stopped", "stopped by user"
-                raise KeyboardInterrupt  # Ctrl+C must stop the parent turn too
-            if sub.last_stats.error:
+            report = None
+            for attempt, (prov, model) in enumerate(candidates):
+                client = p.provider if prov == p.provider_name else (p.client_for(prov) if p.client_for else None)
+                if client is None:
+                    p.events.notice(f"  ↳ {base_label}: provider '{prov}' is not configured; skipping {model}", "warn")
+                    continue
+                if attempt:
+                    p.events.subagent_step(key, f"retrying on {model}", is_tool=False)
+                sub = Agent(client, {**p.settings, "model": model, "max_turns": 30 if edit else 20,
+                                     "auto_compact_ratio": 0},
+                            sub_ctx, perms, _SubagentEvents(p.events, label, key), tools=tools,
+                            system_override=system)
+                subs.append(sub)
+                sub.cancel = p.cancel
+                sub.is_subagent = True
+                sub.provider_name = prov
+                sub.fallback_client = p.fallback_client
+                sub.fallback_resolver = p.fallback_resolver
+                sub.stats_log = p.stats_log
+                sub.client_for = p.client_for
+                report = sub.run(args["prompt"])
+                if sub.last_stats.interrupted:
+                    status, detail = "stopped", "stopped by user"
+                    raise KeyboardInterrupt  # Ctrl+C must stop the parent turn too
+                if not sub.last_stats.error:
+                    if attempt:
+                        report = f"(ran on {prov}:{model} after the first model failed)\n{report or ''}"
+                    break
+                # The model itself failed (API error). Retry on the next model, but only when that
+                # cannot redo side effects: research tasks, or edit tasks that have not acted yet.
                 detail = f"failed: {sub.last_stats.error}"
-                raise ToolError(f"sub-agent failed: {sub.last_stats.error}")
+                if edit and sub.last_stats.tool_calls:
+                    raise ToolError(f"sub-agent failed after making changes: {sub.last_stats.error}")
+                if attempt < len(candidates) - 1:
+                    p.events.notice(f"  ↳ {base_label}: {model} failed ({sub.last_stats.error[:80]}); "
+                                    "trying the next model", "warn")
+            else:
+                raise ToolError(f"sub-agent failed on every model tried: {detail.removeprefix('failed: ')}")
             status = "done"
             detail = f"report ready ({len(report or ''):,} chars)" if report else "no report"
             report = report or "(sub-agent returned no report)"
@@ -861,8 +887,9 @@ class TaskTool(Tool):
                 report += f"\n\n<hook-context>\n{stop.additional_context}\n</hook-context>"
             return report
         finally:
-            p.total_prompt_tokens += sub.total_prompt_tokens
-            p.total_completion_tokens += sub.total_completion_tokens
+            for sub in subs:
+                p.total_prompt_tokens += sub.total_prompt_tokens
+                p.total_completion_tokens += sub.total_completion_tokens
             p.events.subagent_end(key, status, detail)
 
 
@@ -924,3 +951,23 @@ def team_block(settings: Dict[str, Any]) -> str:
             "give each task the model that suits its part):\n" + "\n".join(lines)) if lines else ""
     _TEAM_CACHE.update(at=time.time(), key=key, text=text)
     return text
+
+
+def team_specs(settings: Dict[str, Any]) -> List[str]:
+    return [(e.get("model", "") if isinstance(e, dict) else str(e)) for e in (settings.get("subagent_models") or [])
+            if (e.get("model") if isinstance(e, dict) else e)]
+
+
+_FAST_USE = re.compile(r"fast|quick|cheap|search|read|explor|look|research|summar", re.I)
+_STRONG_USE = re.compile(r"strong|careful|smart|review|edit|change|fix|implement|refactor|code", re.I)
+
+
+def pick_team_model(settings: Dict[str, Any], edit: bool) -> str:
+    """When the main model did not choose, pick the team member whose note fits the job:
+    a fast/search one for research, a careful/review one for edits. '' if nothing fits."""
+    team = [e for e in (settings.get("subagent_models") or []) if isinstance(e, dict) and e.get("model")]
+    want = _STRONG_USE if edit else _FAST_USE
+    match = next((e["model"] for e in team if want.search(e.get("use", ""))), "")
+    if match or edit:
+        return match  # edits without a matching member stay on the main model
+    return team_specs(settings)[0] if team_specs(settings) else ""

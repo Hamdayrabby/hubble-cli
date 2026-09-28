@@ -180,6 +180,7 @@ class OpenAICompatProvider:
             payload["tool_choice"] = "auto"
 
         attempt = 0
+        retried_auth = False
         while True:
             attempt += 1
             try:
@@ -188,6 +189,13 @@ class OpenAICompatProvider:
                 if attempt > self.max_retries:
                     raise ProviderError(str(e), e.status) from None
                 time.sleep(e.wait if e.wait is not None else min(2 ** (attempt - 1), 8))
+            except ProviderError as e:
+                # Gateways that rotate upstream keys answer a spurious 401 now and then, for a request
+                # that works a second later. One retry; a key that is really wrong fails again.
+                if e.status != 401 or retried_auth:
+                    raise
+                retried_auth = True
+                time.sleep(1.0)
 
     def _stream_once(self, payload, on_text, on_reasoning) -> TurnResult:
         result = TurnResult()
