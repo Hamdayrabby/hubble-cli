@@ -309,13 +309,22 @@ INVADERS = [  # (frame A, frame B, color); one row each, top to bottom
     ("▞█▚", "▚█▞", "#ff5fd7"),
     ("▛▀▜", "▙▄▟", "#00d7ff"),
 ]
-SHIP = [" ▲ ", "▟█▙"]
+_SHIP_ROWS = [
+    "▲",
+    "▟█▙",
+    "▗▄▄▄▟█████▙▄▄▄▖",
+    "◢████ H U B B L E ████◣",
+    "▀▀▀▜█████████▛▀▀▀",
+    "▀▼▀   ▀▼▀",
+]
+SHIP_W = max(len(r) for r in _SHIP_ROWS)
+SHIP = [r.center(SHIP_W) for r in _SHIP_ROWS]  # the HUBBLE starship, nose on top
 UFO = "<=●=>"
 
 
 class _Arcade:
-    height = 7          # UFO, 2 invader rows, 2 rows of open space, 2-row ship
-    width = 44          # smallest field that still looks like a formation
+    height = 5 + len(SHIP)  # score/UFO row, 2 invader rows, 2 rows of open space, the ship
+    width = 44              # smallest field that still looks like a formation
     COLS = 8            # invaders per row
     GAP = 5             # columns from one invader to the next
     STEP = 0.45         # seconds per march step
@@ -323,9 +332,11 @@ class _Arcade:
     SHOT_SPEED = 14.0   # rows per second
     WAVE = 14.0         # seconds before a fresh wave marches in
 
-    def field(self, width: int, left: int = 2) -> Tuple[int, int]:
-        """(left, field width) of the play area inside a grid `width` wide, starting at `left`."""
-        fw = max(self.width, min(width - left - 2, 72))
+    def field(self, width: int, left: Optional[int] = None) -> Tuple[int, int]:
+        """(left, field width) of the play area inside a grid `width` wide; centered by default."""
+        fw = max(self.width, min(width - 4, 76))
+        if left is None:
+            left = max(2, (width - fw) // 2)
         return left, fw
 
     def _march(self, t: float, span: int) -> int:
@@ -336,7 +347,9 @@ class _Arcade:
         return k if k <= span else period - k
 
     def _ship_x(self, t: float, fw: int) -> float:
-        return (fw - 3) / 2 + (fw - 5) / 2 * math.sin(t * 0.8) * 0.9
+        """Left column of the ship: cruises around the middle of the field."""
+        room = max(0, fw - SHIP_W)
+        return room / 2 + room / 2 * 0.85 * math.sin(t * 0.6)
 
     def state(self, t: float, fw: int):
         """(offset, dead {(row, i)}, explosions [(row, col, age)], bullets [(y, x)], score)."""
@@ -350,7 +363,7 @@ class _Arcade:
             fired = wave_start + k * self.SHOT_EVERY
             if fired > t:
                 break
-            x = int(round(self._ship_x(fired, fw))) + 1          # muzzle, middle of the ship
+            x = int(round(self._ship_x(fired, fw))) + SHIP_W // 2   # the nose cannon
             # Bullet leaves row 5 (ship tip) and climbs; invader rows are 1 and 2.
             hit = None
             for row in (1, 0):  # lowest invader row first, the one a bullet meets first
@@ -375,7 +388,7 @@ class _Arcade:
         total_score = int(t / self.WAVE) * 400 + score
         return self._march(t, span), dead, booms, bullets, total_score
 
-    def draw(self, grid, top: int, t: float, left: int = 2):
+    def draw(self, grid, top: int, t: float, left: Optional[int] = None):
         width = len(grid[0])
         left, fw = self.field(width, left)
         fw = min(fw, width - left)
@@ -412,10 +425,26 @@ class _Arcade:
             if 0 <= y <= 5:
                 put(y, x, "│", "bold #ffffaf")
         sx = int(round(self._ship_x(t, fw)))
+        flame = int(t * 10) % 3
+        name_row = next(i for i, r in enumerate(SHIP) if "H U B B L E" in r)
         for r, line in enumerate(SHIP):
             for j, ch in enumerate(line):
-                if ch != " ":
-                    put(5 + r, sx + j, ch, "bold #5fff87" if ch == "▲" else "#00d75f")
+                if ch == " " and r != name_row:
+                    continue
+                if ch == "▲":
+                    style = "bold #ffffff" if int(t * 6) % 2 else "bold #d7e7ff"
+                elif ch == "▼":
+                    ch = ("▼", "▽", "▾")[(flame + j) % 3]
+                    style = ("bold #ffd75f", "#ff8700", "#ff5f00")[(flame + j) % 3]
+                elif ch.isalpha():
+                    style = f"bold {_blend(GRADIENT, ((j / SHIP_W) + t * 0.15) % 1.0)}"  # glowing name
+                elif r == name_row and ch == " ":
+                    style = ""  # opaque inside the hull, so stars pass behind the ship
+                elif ch in "◢◣":
+                    style = "#ff5f87"  # wing-tip lights
+                else:
+                    style = "#afc7e7" if r < name_row else "#5f87af"
+                put(5 + r, sx + j, ch, style)
 
 
 ARCADE = _Arcade()
@@ -560,28 +589,22 @@ def compose_grid(width: int, height: int, t: float, status: List[Text], tips: Li
     Picks the richest layout that fits `height` rows, dropping tips, then shrinking the scene,
     then the logo, so it also works in short terminals such as VS Code's panel.
     """
-    width = max(40, min(width - 1, 132))
+    width = max(40, min(width - 1, 110))
     height = max(height, 1)
-    # Logo sizes: 2 = large pixel letters, 1 = block letters, 0 = one-line wordmark.
+    # Logo sizes: 1 = block letters, 0 = one-line wordmark. (2, the large pixel letters, is kept
+    # for anyone who wants it back, but the HUBBLE starship is the star of the screen now.)
     logo_h = {2: 9, 1: 7, 0: 1}  # letter rows + shadow row + tagline
-    top = 2 if width >= BIG_LOGO_WIDTH + 4 else (1 if width >= 58 else 0)
-    mid = min(top, 1)
-    # Wide terminal: the arcade game plays beside the big logo, costing no rows at all.
-    side_left = 2 + BIG_LOGO_WIDTH + 3
-    side = top == 2 and width - side_left - 1 >= ARCADE.width
-    # Richest to poorest: big name first, then the game, then tips, then status lines.
+    top = 1 if width >= 58 else 0
+    # Richest to poorest: the starship scene comes first, then the bigger logo, then tips,
+    # then status lines.
     n_status = len(status)
-    layouts = []
-    for cand_size in dict.fromkeys([top, mid, 0]):
-        game = "side" if side and cand_size == 2 else ARCADE
-        for cand_art, cand_tips in ((game, True), (game, False), (None, True), (None, False)):
-            layouts.append((cand_size, cand_art, cand_tips, n_status))
-        for n in (min(2, n_status), min(1, n_status), 0):
-            layouts.append((cand_size, "side" if game == "side" else None, False, n))
+    shrink = [(True, n_status), (False, n_status), (False, min(2, n_status)), (False, min(1, n_status)),
+              (False, 0)]
+    layouts = [(s, a, tp, n) for a in (ARCADE, None) for s in dict.fromkeys([top, 0]) for tp, n in shrink]
     size, art, with_tips, n_status = layouts[-1]
 
     def art_rows(a):
-        return a.height + 1 if a is not None and a != "side" else 0
+        return a.height + 1 if a is not None else 0
 
     for cand_size, cand_art, cand_tips, cand_n in layouts:
         if cand_art is ARCADE and width < ARCADE.width + 4:
@@ -593,8 +616,6 @@ def compose_grid(width: int, height: int, t: float, status: List[Text], tips: Li
     status = status[:n_status]
     use_big = size > 0
     logo_h = logo_h[size]
-    if art != "side" and use_big:
-        width = min(width, 110)  # without the game beside it, keep the old, calmer width
 
     rows_total = logo_h + 1 + art_rows(art) + len(status) + (1 + len(tips) if with_tips else 0) + 1
     rows_total = min(rows_total, height) if rows_total > height else rows_total  # never exceed the budget
@@ -616,8 +637,6 @@ def compose_grid(width: int, height: int, t: float, status: List[Text], tips: Li
                                                     ("   v" + version, "dim")))
     else:
         _stamp_text(grid, row, 2, Text.assemble(small_logo(), ("  v" + version, "dim")))
-    if art == "side":
-        ARCADE.draw(grid, 0, t, left=side_left)
     row += logo_h + 1
 
     if art is ARCADE:

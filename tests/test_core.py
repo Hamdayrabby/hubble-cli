@@ -478,16 +478,21 @@ def test_arcade_scene_plays_and_is_deterministic():
     assert all(len(r) == 60 for r in frame(7.7))
 
 
-def test_arcade_goes_beside_big_logo_when_wide():
+def test_home_shows_the_hubble_starship_with_block_logo():
     from hubble.banner import compose_grid, home_info_lines
     st, tips = home_info_lines(version="4", provider="h", model="m", mode="default", root="x", session_id=None,
                                memory_files=[], model_count=5, provider_count=1, resumable=0, show_provider=False)
-    wide = compose_grid(130, 16, 1.0, st, tips, "4")
-    assert "SCORE" in "".join(c for c, _ in wide[0])        # same rows as the logo: no extra height
-    assert "██" in "".join(c for c, _ in wide[0])
-    narrow = compose_grid(100, 30, 1.0, st, tips, "4")
-    assert not any("SCORE" in "".join(c for c, _ in r) for r in narrow[:9])
-    assert any("SCORE" in "".join(c for c, _ in r) for r in narrow)  # stacked below the logo
+
+    def lines(g):
+        return ["".join(c for c, _ in r) for r in g]
+
+    tall = lines(compose_grid(110, 30, 1.0, st, tips, "4"))
+    assert "██╗  ██╗" in tall[0]                              # the smaller block-letter logo
+    ship = next(l for l in tall if "H U B B L E" in l)
+    mid = (ship.index("H U B B L E") + 5) / len(ship)
+    assert 0.2 < mid < 0.8                                    # flies around the middle
+    short = lines(compose_grid(110, 16, 1.0, st, tips, "4"))  # e.g. a VS Code panel
+    assert any("H U B B L E" in l for l in short)             # the ship still shows
 
 
 def test_visuals_render_at_any_width():
