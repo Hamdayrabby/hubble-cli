@@ -52,13 +52,35 @@ def render_diff(diff: str, max_lines: int = MAX_DIFF_LINES) -> Text:
     return out
 
 
+class _BlockPreview:
+    """The block still being written, redrawn by rich.live on each refresh (~12/s)."""
+
+    def __init__(self, owner: "StreamingMarkdown"):
+        self.owner = owner
+
+    def __rich__(self):
+        text = self.owner.buf
+        if not text.strip():
+            return Text("")
+        lines = text.splitlines()
+        room = max(4, self.owner.console.height - 4)
+        if len(lines) > room:
+            # Taller than the screen: show the newest lines as plain text; the whole block is
+            # printed properly formatted the moment it is complete.
+            return Text("\n".join(lines[-room:]))
+        return Markdown(text, code_theme="monokai")
+
+
 class StreamingMarkdown:
-    """Renders markdown block by block as it streams, never re-drawing earlier output."""
+    """Renders markdown as it streams. Finished blocks are printed for good (formatted, never
+    redrawn); the block still being written shows live underneath them, so text appears as soon
+    as the model sends it instead of only when a paragraph or code block is complete."""
 
     def __init__(self, con: Console):
         self.console = con
         self.buf = ""
         self.printed_any = False
+        self.live = None
 
     def feed(self, delta: str):
         self.buf += delta
@@ -66,8 +88,21 @@ class StreamingMarkdown:
         if cut:
             chunk, self.buf = self.buf[:cut], self.buf[cut:]
             self._render(chunk)
+        if self.live is None and self.buf.strip() and self.console.is_terminal:
+            from rich.live import Live
+            self.live = Live(_BlockPreview(self), console=self.console, refresh_per_second=12,
+                             transient=True, vertical_overflow="crop")
+            self.live.start()
+
+    def _stop_live(self):
+        if self.live is not None:
+            try:
+                self.live.stop()
+            finally:
+                self.live = None
 
     def flush(self):
+        self._stop_live()
         if self.buf.strip():
             self._render(self.buf)
         self.buf = ""
