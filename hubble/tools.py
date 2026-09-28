@@ -455,7 +455,7 @@ class Shell(Tool):
         except OSError as e:
             raise ToolError(f"Could not start shell: {e}")
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
+            stdout, stderr = communicate_interruptibly(proc, timeout)
         except subprocess.TimeoutExpired:
             _kill_tree(proc)
             stdout, stderr = _drain(proc)

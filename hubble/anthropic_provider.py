@@ -16,7 +16,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
-from hubble.provider import ProviderError, ToolCall, TurnResult, parse_arguments
+from hubble.provider import ProviderError, ToolCall, TurnResult, parse_arguments, pump
 
 DEFAULT_BASE_URL = "https://api.anthropic.com"
 # Models where the API's server-side refusal fallback is recommended (and supported).
@@ -192,21 +192,40 @@ class AnthropicProvider:
     def _stream_once(self, model, params, on_text, on_reasoning) -> TurnResult:
         start = time.time()
         result = TurnResult()
-        if self._use_fallbacks(model):
-            ctx = self.client.beta.messages.stream(**params, betas=[FALLBACK_BETA], fallbacks="default")
-        else:
-            ctx = self.client.messages.stream(**params)
-        with ctx as stream:
-            for event in stream:
-                if event.type == "text" and event.text:
-                    if not result.ttft_ms:
-                        result.ttft_ms = round((time.time() - start) * 1000)
-                    if on_text:
-                        on_text(event.text)
-                elif event.type == "thinking" and getattr(event, "thinking", ""):
-                    if on_reasoning:
-                        on_reasoning(event.thinking)
-            final = stream.get_final_message()
+        state: Dict[str, Any] = {}
+
+        def produce(put):
+            if self._use_fallbacks(model):
+                ctx = self.client.beta.messages.stream(**params, betas=[FALLBACK_BETA], fallbacks="default")
+            else:
+                ctx = self.client.messages.stream(**params)
+            with ctx as stream:
+                state["stream"] = stream
+                for event in stream:
+                    put(("event", event))
+                put(("final", stream.get_final_message()))
+
+        def abort():
+            if state.get("stream") is not None:
+                state["stream"].close()
+
+        final = None
+        # The SDK read runs in a worker thread so Ctrl+C lands at once, even mid-thinking.
+        for kind, value in pump(produce, abort):
+            if kind == "final":
+                final = value
+                continue
+            event = value
+            if event.type == "text" and event.text:
+                if not result.ttft_ms:
+                    result.ttft_ms = round((time.time() - start) * 1000)
+                if on_text:
+                    on_text(event.text)
+            elif event.type == "thinking" and getattr(event, "thinking", ""):
+                if on_reasoning:
+                    on_reasoning(event.thinking)
+        if final is None:
+            raise ProviderError("Claude's stream ended without a final message")
         data = final.to_dict()
         blocks = data.get("content") or []
         result.text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")

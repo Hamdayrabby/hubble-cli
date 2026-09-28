@@ -2,7 +2,9 @@
 
 import hashlib
 import json
+import queue
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
@@ -11,6 +13,48 @@ import httpx
 from urllib.parse import urlparse
 
 RETRY_STATUS = {408, 429, 500, 502, 503, 504, 529}  # 529: Anthropic "overloaded"
+
+
+_END = object()
+_ERR = object()
+
+
+def pump(produce: Callable[[Callable[[Any], None]], None], abort: Callable[[], None]):
+    """Run the blocking `produce(put)` in a worker thread and yield what it puts.
+
+    On Windows a Ctrl+C cannot interrupt a thread blocked in a socket read: it only lands once
+    the model sends the next byte, which for a slow or stalled model can take minutes. Waiting on
+    a queue with a short timeout instead lets KeyboardInterrupt through within 0.1 s; `abort()`
+    then closes the connection so the worker unblocks and exits. Worker exceptions re-raise here.
+    """
+    q: "queue.Queue[Any]" = queue.Queue()
+
+    def worker():
+        try:
+            produce(q.put)
+        except BaseException as e:  # hand every failure to the consumer, including SDK errors
+            q.put((_ERR, e))
+        finally:
+            q.put(_END)
+
+    threading.Thread(target=worker, daemon=True, name="hubble-stream").start()
+    try:
+        while True:
+            try:
+                item = q.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if item is _END:
+                return
+            if isinstance(item, tuple) and item and item[0] is _ERR:
+                raise item[1]
+            yield item
+    except (KeyboardInterrupt, GeneratorExit):
+        try:
+            abort()
+        except Exception:
+            pass
+        raise
 
 
 class ProviderError(Exception):
@@ -153,62 +197,77 @@ class OpenAICompatProvider:
         start = time.time()
         got_delta = False
 
-        try:
+        state: Dict[str, Any] = {}
+
+        def produce(put):
             with self.client.stream("POST", f"{self.base_url}/chat/completions",
                                     headers=self.headers, json=payload) as resp:
+                state["resp"] = resp
                 if resp.status_code != 200:
-                    body = resp.read().decode("utf-8", errors="replace")
-                    msg = f"HTTP {resp.status_code}: {_error_message(body)}"
-                    if resp.status_code in RETRY_STATUS:
-                        raise _Retryable(msg, resp.status_code, _retry_after(resp))
-                    raise ProviderError(msg, resp.status_code)
-
+                    put(("status", resp.status_code, resp.read().decode("utf-8", errors="replace"),
+                         _retry_after(resp)))
+                    return
                 for line in resp.iter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data)
-                    except ValueError:
-                        continue
-                    if chunk.get("error"):
-                        err = chunk["error"]
-                        raise ProviderError(err.get("message", str(err)) if isinstance(err, dict) else str(err))
-                    if chunk.get("usage"):
-                        result.usage = {k: v for k, v in chunk["usage"].items() if isinstance(v, int)}
-                    for choice in chunk.get("choices") or []:
-                        delta = choice.get("delta") or {}
-                        reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
-                        if reasoning:
-                            got_delta = True
-                            reasoning_parts.append(reasoning)
-                            if on_reasoning:
-                                on_reasoning(reasoning)
-                        content = delta.get("content") or ""
-                        if content:
-                            if not result.ttft_ms:
-                                result.ttft_ms = round((time.time() - start) * 1000)
-                            got_delta = True
-                            text_parts.append(content)
-                            if on_text:
-                                on_text(content)
-                        for tc in delta.get("tool_calls") or []:
-                            got_delta = True
-                            slot = calls.setdefault(self._slot_index(calls, tc),
-                                                    {"id": "", "name": "", "arguments": ""})
-                            if tc.get("id"):
-                                slot["id"] = tc["id"]
-                            fn = tc.get("function") or {}
-                            name = fn.get("name")
-                            if name and name != slot["name"]:  # some backends resend the full name
-                                slot["name"] += name
-                            if fn.get("arguments"):
-                                args = fn["arguments"]
-                                slot["arguments"] += args if isinstance(args, str) else json.dumps(args)
-                        if choice.get("finish_reason"):
-                            result.finish_reason = choice["finish_reason"]
+                    put(("line", line))
+
+        def abort():
+            if state.get("resp") is not None:
+                state["resp"].close()
+
+        try:
+            for item in pump(produce, abort):
+                if item[0] == "status":
+                    _, status, body, wait = item
+                    msg = f"HTTP {status}: {_error_message(body)}"
+                    if status in RETRY_STATUS:
+                        raise _Retryable(msg, status, wait)
+                    raise ProviderError(msg, status)
+                line = item[1]
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except ValueError:
+                    continue
+                if chunk.get("error"):
+                    err = chunk["error"]
+                    raise ProviderError(err.get("message", str(err)) if isinstance(err, dict) else str(err))
+                if chunk.get("usage"):
+                    result.usage = {k: v for k, v in chunk["usage"].items() if isinstance(v, int)}
+                for choice in chunk.get("choices") or []:
+                    delta = choice.get("delta") or {}
+                    reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                    if reasoning:
+                        got_delta = True
+                        reasoning_parts.append(reasoning)
+                        if on_reasoning:
+                            on_reasoning(reasoning)
+                    content = delta.get("content") or ""
+                    if content:
+                        if not result.ttft_ms:
+                            result.ttft_ms = round((time.time() - start) * 1000)
+                        got_delta = True
+                        text_parts.append(content)
+                        if on_text:
+                            on_text(content)
+                    for tc in delta.get("tool_calls") or []:
+                        got_delta = True
+                        slot = calls.setdefault(self._slot_index(calls, tc),
+                                                {"id": "", "name": "", "arguments": ""})
+                        if tc.get("id"):
+                            slot["id"] = tc["id"]
+                        fn = tc.get("function") or {}
+                        name = fn.get("name")
+                        if name and name != slot["name"]:  # some backends resend the full name
+                            slot["name"] += name
+                        if fn.get("arguments"):
+                            args = fn["arguments"]
+                            slot["arguments"] += args if isinstance(args, str) else json.dumps(args)
+                    if choice.get("finish_reason"):
+                        result.finish_reason = choice["finish_reason"]
         except (httpx.TimeoutException, httpx.TransportError) as e:
             if got_delta:
                 raise ProviderError(f"Connection lost mid-stream: {e}") from None
