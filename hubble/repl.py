@@ -241,24 +241,48 @@ class Repl:
             buf.validate_and_handle()
 
         HOME_DIR.mkdir(parents=True, exist_ok=True)
+        from prompt_toolkit.styles import Style
         return PromptSession(history=FileHistory(str(HOME_DIR / "history")), completer=ReplCompleter(self),
                              complete_while_typing=True, key_bindings=kb, bottom_toolbar=self._toolbar,
                              multiline=False, enable_history_search=False, refresh_interval=1.0,
-                             reserve_space_for_menu=14)
+                             reserve_space_for_menu=14, style=Style.from_dict(self.TOOLBAR_STYLE))
+
+    SEP = "<tb.sep>  ·  </tb.sep>"
 
     def _toolbar(self):
         a = self.agent
         mode = a.permissions.mode
-        color = {"default": "ansigray", "accept-edits": "ansigreen", "plan": "ansiblue", "yolo": "ansired"}[mode]
-        ctx_pct = f"{a.context_ratio():.0%}"
-        pinned = f" | {len(a.pinned)} pinned" if a.pinned else ""
-        prov = f"{escape_html(a.provider_name)}: " if len(self.providers) > 1 else ""
-        line1 = (f" {prov}<b>{escape_html(a.model)}</b> | mode: <style fg='{color}'><b>{mode}</b></style>"
-                 f" (shift+tab) | persona: {a.persona} | context {ctx_pct}{pinned}"
-                 + "".join(f" | {escape_html(n)}: {s.summary()}" for n, s in self.scanners.items() if s.running)
-                 + " ")
+        ratio = a.context_ratio()
+        ctx_cls = "tb.warn" if ratio >= 0.8 else "tb.val"
+        prov = f"<tb.dim>{escape_html(a.provider_name)} </tb.dim>" if len(self.providers) > 1 else ""
+        parts = [f"{prov}<tb.model>{escape_html(a.model)}</tb.model>",
+                 f"<tb.mode-{mode}>{mode}</tb.mode-{mode}> <tb.dim>shift+tab</tb.dim>",
+                 f"<tb.dim>persona</tb.dim> <tb.val>{a.persona}</tb.val>",
+                 f"<tb.dim>context</tb.dim> <{ctx_cls}>{ratio:.0%}</{ctx_cls}>"]
+        if a.pinned:
+            parts.append(f"<tb.val>{len(a.pinned)}</tb.val> <tb.dim>pinned</tb.dim>")
+        for n, s in self.scanners.items():
+            if s.running:
+                parts.append(f"<tb.dim>checking {escape_html(n)}</tb.dim> <tb.val>{s.progress()}</tb.val>")
         self._sync_scan_visuals()
-        return HTML(line1 + "\n" + self._stats_line())
+        try:
+            from prompt_toolkit.application import get_app
+            width = get_app().output.get_size().columns
+        except Exception:
+            width = 80
+        rule = f"<tb.rule>{'─' * max(0, width - 1)}</tb.rule>"
+        return HTML(rule + "\n  " + self.SEP.join(parts) + "\n  " + self._stats_line())
+
+    TOOLBAR_STYLE = {
+        # No reverse-video bar: the toolbar sits on the terminal's own background.
+        "bottom-toolbar": "noreverse bg:default #6c6c80",
+        "bottom-toolbar.text": "noreverse bg:default",
+        "tb.rule": "#303040", "tb.sep": "#44445a", "tb.dim": "#6c6c80", "tb.val": "#b8b8cc",
+        "tb.model": "bold #00d7ff", "tb.warn": "bold #ffaf00",
+        "tb.mode-default": "#b8b8cc", "tb.mode-accept-edits": "bold #5fd787",
+        "tb.mode-plan": "bold #5fafff", "tb.mode-yolo": "bold #ff5f5f",
+        "tb.in": "#87afd7", "tb.out": "#af87d7", "tb.speed": "#5fd7af",
+    }
 
     def _sync_scan_visuals(self):
         """Called on every prompt redraw (at least once a second): keep the home screen's model
@@ -298,13 +322,16 @@ class Repl:
         s = self.turn_stats
         session_total = a.total_prompt_tokens + a.total_completion_tokens
         if s is None or not s.model_calls:
-            return f" Tokens: no turns yet  •  session total {session_total:,} "
-        total = s.prompt_tokens + s.completion_tokens
+            return f"<tb.dim>no turns yet</tb.dim>{self.SEP}<tb.dim>session</tb.dim> <tb.val>{session_total:,}</tb.val>"
         speed = s.completion_tokens / s.duration if s.duration else 0.0
-        tools = f" | 🔧 {s.tool_calls} tool call{'s' if s.tool_calls != 1 else ''}" if s.tool_calls else ""
-        return (f" Tokens: <b>📥 In: {s.prompt_tokens:,}</b> | <b>📤 Out: {s.completion_tokens:,}</b>"
-                f" | <b>📊 Total: {total:,}</b>  •  Time: {s.duration:.2f}s | 🚀 {speed:.1f} tok/s{tools}"
-                f"  •  session {session_total:,} ")
+        parts = [f"<tb.in>↑ {s.prompt_tokens:,}</tb.in> <tb.dim>in</tb.dim>  "
+                 f"<tb.out>↓ {s.completion_tokens:,}</tb.out> <tb.dim>out</tb.dim>",
+                 f"<tb.val>{s.duration:.1f}s</tb.val>",
+                 f"<tb.speed>{speed:.1f}</tb.speed> <tb.dim>tok/s</tb.dim>"]
+        if s.tool_calls:
+            parts.append(f"<tb.val>{s.tool_calls}</tb.val> <tb.dim>tool call{'s' if s.tool_calls != 1 else ''}</tb.dim>")
+        parts.append(f"<tb.dim>session</tb.dim> <tb.val>{session_total:,}</tb.val>")
+        return self.SEP.join(parts)
 
     def _home_info(self):
         a = self.agent
@@ -340,8 +367,8 @@ class Repl:
             typed = app.current_buffer.text
         except Exception:
             return HTML("<ansicyan><b>❯</b></ansicyan> ")
-        # Leave room for the prompt line and the 2-line toolbar, plus the completion menu while typing / or @.
-        budget = size.rows - 4 - (10 if typed[:1] in ("/", "@") or " @" in typed else 0)
+        # Leave room for the prompt line and the 3-line toolbar, plus the completion menu while typing / or @.
+        budget = size.rows - 5 - (10 if typed[:1] in ("/", "@") or " @" in typed else 0)
         # prompt_toolkit asks for the message several times per redraw (measure, then draw);
         # build each frame once per 1/30 s tick and reuse it.
         elapsed = time.time() - self._home_t0

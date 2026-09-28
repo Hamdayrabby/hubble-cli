@@ -128,6 +128,12 @@ class ModelScanner:
         self._thread.start()
         return True
 
+    def progress(self) -> str:
+        """Short form for the bottom bar: '16/74', or 'retry 16/74' in the second pass."""
+        if self.retry_total:
+            return f"retry {self.retry_done}/{self.retry_total}"
+        return f"{self.done}/{self.total or '?'}"
+
     def summary(self) -> str:
         if self.status == "running":
             if self.retry_total:
