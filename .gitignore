@@ -28,3 +28,4 @@ dist/
 .vscode/
 Thumbs.db
 hubble_cli-*/
+junit.xml
