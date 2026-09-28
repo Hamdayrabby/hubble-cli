@@ -319,8 +319,13 @@ Allow rules never apply to chained commands (`&&`, `;`, `|`, redirects), so `she
 
 ## Providers (extra base URLs and API keys)
 
-Any OpenAI-compatible API can be added next to the built-in AIHub gateway: OpenRouter, Groq, OpenAI, Mistral,
-Gemini's OpenAI endpoint, a local Ollama server, and others.
+Add providers next to the built-in AIHub gateway. The `/provider add` list has presets for:
+- **Claude (Anthropic)** — native Messages API (not an OpenAI shim): tool use, images, thinking, prompt caching
+  of the system prompt, and the real context window of each model. An `ANTHROPIC_API_KEY` in your environment is
+  picked up automatically as a provider named `anthropic` (`ANTHROPIC_BASE_URL` too, for a proxy).
+- **OpenAI-compatible:** OpenAI, OpenRouter, Gemini, Groq, Mistral, DeepSeek, xAI (Grok), Together, Fireworks,
+  Cerebras, NVIDIA, Moonshot (Kimi), and local Ollama / LM Studio servers.
+- **Custom URL**, either OpenAI-compatible or Anthropic-compatible (a proxy or gateway speaking `/v1/messages`).
 
 1. Type `/provider add`, or open `/provider` and choose **+ Add a provider**.
 2. Pick a known provider or **Custom URL...**, then paste the API key. The key is hidden as you type.

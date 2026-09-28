@@ -388,8 +388,8 @@ class Repl:
 
     def client(self, name: str) -> OpenAICompatProvider:
         if name not in self.clients:
-            cfg = self.providers[name]
-            self.clients[name] = OpenAICompatProvider(cfg.base_url, cfg.api_key)
+            from hubble.providers import make_client
+            self.clients[name] = make_client(self.providers[name])
         return self.clients[name]
 
     def start_scan(self, name: str, reason: str, quiet: bool = False) -> bool:
@@ -398,7 +398,8 @@ class Repl:
             return False
         scanner = self.scanners.get(name)
         if scanner is None:
-            scanner = self.scanners[name] = ModelScanner(cfg.base_url, cfg.api_key, output=scan_file(name))
+            scanner = self.scanners[name] = ModelScanner(cfg.base_url, cfg.api_key, output=scan_file(name),
+                                                         kind=getattr(cfg, "kind", "openai"))
         if not scanner.start():
             return False
         self._unannounced.add(name)
@@ -436,7 +437,8 @@ class Repl:
             return
         hours = float(raw)  # 0 (the default): check every startup; >0: only once that stale
         for name, cfg in self.providers.items():
-            if not cfg.check_models:
+            # Claude's check is just its free model listing, so it always runs.
+            if not cfg.check_models and getattr(cfg, "kind", "openai") != "anthropic":
                 continue
             age = scan_age_hours(scan_file(name))
             if age is None or hours <= 0 or age >= hours:
@@ -803,7 +805,7 @@ class Repl:
         register_provider(cfg, ids)
         self.providers[cfg.name] = cfg
         console.print(f"[green]Saved provider {escape(cfg.name)}[/green] [dim](~/.hubble/providers.json)[/dim]")
-        if cfg.check_models:
+        if cfg.check_models or cfg.kind == "anthropic":
             self.start_scan(cfg.name, "New provider.")
         if _confirm(f"Switch to {cfg.name} now?"):
             self.choose_model(only=cfg.name)

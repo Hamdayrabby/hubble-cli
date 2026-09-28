@@ -8,6 +8,7 @@ has its own model scan file.
 """
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,14 +27,31 @@ LEGACY_DEFAULT_PROVIDER = "aihub"
 PROVIDERS_FILE = HOME_DIR / "providers.json"
 NAME_RX = re.compile(r"^[a-z0-9][a-z0-9_-]{0,30}$")
 
+# (name, base URL, API kind). "anthropic" = Claude's native Messages API; everything else speaks
+# the OpenAI chat-completions API.
 KNOWN_EXAMPLES = [
-    ("openrouter", "https://openrouter.ai/api/v1"),
-    ("groq", "https://api.groq.com/openai/v1"),
-    ("openai", "https://api.openai.com/v1"),
-    ("mistral", "https://api.mistral.ai/v1"),
-    ("gemini", "https://generativelanguage.googleapis.com/v1beta/openai"),
-    ("ollama", "http://localhost:11434/v1"),
+    ("anthropic", "https://api.anthropic.com", "anthropic"),
+    ("openai", "https://api.openai.com/v1", "openai"),
+    ("openrouter", "https://openrouter.ai/api/v1", "openai"),
+    ("gemini", "https://generativelanguage.googleapis.com/v1beta/openai", "openai"),
+    ("groq", "https://api.groq.com/openai/v1", "openai"),
+    ("mistral", "https://api.mistral.ai/v1", "openai"),
+    ("deepseek", "https://api.deepseek.com/v1", "openai"),
+    ("xai", "https://api.x.ai/v1", "openai"),
+    ("together", "https://api.together.xyz/v1", "openai"),
+    ("fireworks", "https://api.fireworks.ai/inference/v1", "openai"),
+    ("cerebras", "https://api.cerebras.ai/v1", "openai"),
+    ("nvidia", "https://integrate.api.nvidia.com/v1", "openai"),
+    ("moonshot", "https://api.moonshot.ai/v1", "openai"),
+    ("ollama", "http://localhost:11434/v1", "openai"),
+    ("lmstudio", "http://localhost:1234/v1", "openai"),
 ]
+KINDS = ("openai", "anthropic")
+
+
+def detect_kind(base_url: str) -> str:
+    from urllib.parse import urlparse
+    return "anthropic" if (urlparse(base_url).hostname or "") == "api.anthropic.com" else "openai"
 
 
 @dataclass
@@ -42,6 +60,16 @@ class ProviderConfig:
     base_url: str
     api_key: str
     check_models: bool = True  # probe each model for availability (costs one tiny request per model)
+    kind: str = "openai"       # openai | anthropic
+
+
+def make_client(cfg: "ProviderConfig"):
+    """The right API client for a provider's kind."""
+    if cfg.kind == "anthropic":
+        from hubble.anthropic_provider import AnthropicProvider
+        return AnthropicProvider(cfg.base_url, cfg.api_key)
+    from hubble.provider import OpenAICompatProvider
+    return OpenAICompatProvider(cfg.base_url, cfg.api_key)
 
 
 def _read_file() -> Dict[str, Any]:
@@ -62,15 +90,21 @@ def _write_file(data: Dict[str, Any]):
 def load_providers(settings: Dict[str, Any]) -> Dict[str, ProviderConfig]:
     out: Dict[str, ProviderConfig] = {}
     if settings.get("api_key"):
-        out[DEFAULT_PROVIDER] = ProviderConfig(DEFAULT_PROVIDER, normalize_base_url(settings["base_url"]),
-                                               settings["api_key"], True)
+        url = normalize_base_url(settings["base_url"])
+        out[DEFAULT_PROVIDER] = ProviderConfig(DEFAULT_PROVIDER, url, settings["api_key"], True, detect_kind(url))
     for name, entry in _read_file().items():
         if isinstance(entry, dict) and entry.get("base_url") and entry.get("api_key"):
             key = keystore.resolve(entry["api_key"])
             if not key:
                 continue  # key lives in a credential store that is not reachable here
-            out[name] = ProviderConfig(name, normalize_base_url(entry["base_url"]), key,
-                                       bool(entry.get("check_models", True)))
+            url = normalize_base_url(entry["base_url"])
+            kind = entry.get("kind") if entry.get("kind") in KINDS else detect_kind(url)
+            out[name] = ProviderConfig(name, url, key, bool(entry.get("check_models", kind != "anthropic")), kind)
+    # A standard ANTHROPIC_API_KEY in the environment is picked up as a ready-made Claude provider.
+    env_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if env_key and not any(c.kind == "anthropic" for c in out.values()) and "anthropic" not in out:
+        base = os.environ.get("ANTHROPIC_BASE_URL", "").strip() or "https://api.anthropic.com"
+        out["anthropic"] = ProviderConfig("anthropic", normalize_base_url(base), env_key, False, "anthropic")
     return out
 
 
@@ -78,7 +112,8 @@ def save_provider(cfg: ProviderConfig):
     """The key goes to the OS credential store when there is one; plain text only as a fallback."""
     data = _read_file()
     stored = keystore.store(cfg.name, cfg.api_key) or cfg.api_key
-    data[cfg.name] = {"base_url": cfg.base_url, "api_key": stored, "check_models": cfg.check_models}
+    data[cfg.name] = {"base_url": cfg.base_url, "api_key": stored, "check_models": cfg.check_models,
+                      "kind": cfg.kind}
     _write_file(data)
 
 
@@ -117,8 +152,21 @@ def scan_file(name: str) -> Path:
     return SCAN_FILE if name == DEFAULT_PROVIDER else HOME_DIR / "models" / f"{name}.json"
 
 
-def verify(base_url: str, api_key: str, timeout: float = 20.0) -> Tuple[bool, str, List[str]]:
+def verify(base_url: str, api_key: str, timeout: float = 20.0, kind: str = "openai") -> Tuple[bool, str, List[str]]:
     """Check the endpoint and key by listing models. Returns (ok, message, model_ids)."""
+    if kind == "anthropic":
+        from hubble.anthropic_provider import AnthropicProvider
+        from hubble.provider import ProviderError
+        try:
+            models = AnthropicProvider(base_url, api_key, max_retries=1).list_models()
+        except ProviderError as e:
+            status = str(e).split(":")[0]
+            if status in ("HTTP 401", "HTTP 403"):
+                return False, f"the API key was rejected ({status})", []
+            return False, f"could not list models: {e}"[:200], []
+        ids = [m["id"] for m in models]
+        return (True, f"connected, {len(ids)} Claude models available", ids) if ids else \
+            (False, "connected, but the key has access to no models", [])
     headers = {"Authorization": f"Bearer {api_key}"}
     try:
         resp = httpx.get(f"{base_url}/models", headers=headers, timeout=timeout)
@@ -144,8 +192,10 @@ def verify(base_url: str, api_key: str, timeout: float = 20.0) -> Tuple[bool, st
     return True, f"connected, {len(ids)} models listed", ids
 
 
-def save_listing(name: str, base_url: str, ids: List[str]):
-    """Record the model list without probing, so the picker can show models right away."""
+def save_listing(name: str, base_url: str, ids: List[str], available: Optional[List[Dict[str, Any]]] = None):
+    """Record the model list without probing, so the picker can show models right away.
+    `available`: models known to work without a probe (e.g. Claude's /v1/models only lists
+    models the key can use), as [{model, context_length}]."""
     path = scan_file(name)
     existing: Dict[str, Any] = {}
     try:
@@ -153,6 +203,10 @@ def save_listing(name: str, base_url: str, ids: List[str]):
     except (OSError, ValueError):
         pass
     existing.update({"base_url": base_url, "all_ids": ids})
+    if available is not None:
+        existing["working_models"] = [{"model": m["model"], "latency_ms": None, "owner": "anthropic", "sample": "",
+                                       "context_length": m.get("context_length")} for m in available]
+        existing["timestamp"] = __import__("time").strftime("%Y-%m-%d %H:%M:%S")
     existing.setdefault("working_models", [])
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")

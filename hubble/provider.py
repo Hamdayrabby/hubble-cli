@@ -10,7 +10,7 @@ from typing import Any, Callable, Dict, List, Optional
 import httpx
 from urllib.parse import urlparse
 
-RETRY_STATUS = {408, 429, 500, 502, 503, 504}
+RETRY_STATUS = {408, 429, 500, 502, 503, 504, 529}  # 529: Anthropic "overloaded"
 
 
 class ProviderError(Exception):
@@ -40,6 +40,9 @@ class TurnResult:
     finish_reason: Optional[str] = None
     ttft_ms: int = 0
     duration: float = 0.0
+    # Provider-native assistant content (Claude's blocks, thinking signatures included), stored on
+    # the history message so the same provider can send it back verbatim next turn.
+    raw_content: Optional[List[Dict[str, Any]]] = None
 
 
 def normalize_base_url(url: str) -> str:
@@ -61,7 +64,7 @@ def normalize_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Rewrite tool_call ids so a history built with one model stays valid for another."""
     out = []
     for m in messages:
-        m = dict(m)
+        m = {k: v for k, v in m.items() if not k.startswith("_")}  # provider-private keys stay local
         if m.get("tool_calls"):
             m["tool_calls"] = [{**tc, "id": _short_id(tc["id"])} for tc in m["tool_calls"]]
             if not m.get("content"):

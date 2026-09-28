@@ -42,15 +42,21 @@ def add_provider_wizard(taken: Iterable[str], first_run: bool = False) -> Option
     taken = set(taken)
     if first_run:
         console.print("[bold cyan]✦ Welcome to Hubble[/bold cyan]\n"
-                      "  No API key is configured yet. Add any OpenAI-compatible provider to start.\n")
+                      "  No API key is configured yet. Add a provider to start: Claude (Anthropic), or any\n"
+                      "  OpenAI-compatible API.\n")
     else:
-        console.print("[bold]Add a provider[/bold] [dim](any OpenAI-compatible API; Esc/Ctrl+C cancels)[/dim]")
+        console.print("[bold]Add a provider[/bold] [dim](Claude or any OpenAI-compatible API; Esc/Ctrl+C cancels)[/dim]")
 
-    choice = pick("Provider", [(url, name, url) for name, url in KNOWN_EXAMPLES] +
-                  [("custom", "Custom URL...", "enter any OpenAI-compatible base URL")])
+    labels = {"anthropic": "Claude (Anthropic API)"}
+    items = [((url, kind), labels.get(name, name), url + ("  · native Messages API" if kind == "anthropic" else ""))
+             for name, url, kind in KNOWN_EXAMPLES]
+    items += [(("custom", "openai"), "Custom URL (OpenAI-compatible)...", "any /v1/chat/completions endpoint"),
+              (("custom", "anthropic"), "Custom URL (Anthropic-compatible)...", "a proxy or gateway speaking /v1/messages")]
+    choice = pick("Provider", items)
     if choice is None:
         return None
-    default_url = "" if choice == "custom" else choice
+    picked_url, kind = choice
+    default_url = "" if picked_url == "custom" else picked_url
 
     while True:
         raw_url = _ask("Base URL: ", default=default_url)
@@ -67,7 +73,7 @@ def add_provider_wizard(taken: Iterable[str], first_run: bool = False) -> Option
             continue
 
         with console.status(f"[dim]Checking {escape(url)} ...[/dim]"):
-            ok, message, ids = verify(url, key)
+            ok, message, ids = verify(url, key, kind=kind)
         if ok:
             console.print(f"[green]✔ {escape(message)}[/green]")
             break
@@ -88,7 +94,10 @@ def add_provider_wizard(taken: Iterable[str], first_run: bool = False) -> Option
         else:
             break
 
+    if kind == "anthropic":
+        # The model list only contains models this key can use: nothing to probe or pay for.
+        return ProviderConfig(name, url, key, check_models=False, kind="anthropic"), ids
     console.print(f"[dim]  Checking availability sends one tiny request to each of the {len(ids)} models. "
                   "That is free on most gateways but can cost a little on paid APIs.[/dim]")
     check = _confirm(f"Check which of the {len(ids)} models respond now (runs in the background)?")
-    return ProviderConfig(name, url, key, check_models=check), ids
+    return ProviderConfig(name, url, key, check_models=check, kind=kind), ids

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **Claude provider:** native Anthropic Messages API support via the official `anthropic` SDK —
+  streaming, tool use, images, thinking blocks echoed back verbatim, system-prompt caching, the real
+  per-model context window from `/v1/models`, and server-side refusal fallbacks on Claude Opus 5 /
+  Fable 5.1. `ANTHROPIC_API_KEY` is detected automatically.
+- More `/provider add` presets: DeepSeek, xAI, Together, Fireworks, Cerebras, NVIDIA, Moonshot,
+  LM Studio, and a custom Anthropic-compatible URL.
+- Home screen: a retro arcade scene with the HUBBLE starship; logo back to block letters.
+
 ## 4.1.2
 
 - The big HUBBLE logo now stays big in shorter terminals (e.g. a 20-row VS Code panel): the

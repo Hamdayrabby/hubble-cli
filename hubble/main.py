@@ -119,7 +119,8 @@ def main(argv=None):
                 sys.exit(f"hubble: {e}")
     cfg = providers[active]
     settings["provider"] = active
-    provider = OpenAICompatProvider(cfg.base_url, cfg.api_key)
+    from hubble.providers import make_client
+    provider = make_client(cfg)
 
     if args.test:
         res = provider.ping(args.test)
@@ -190,18 +191,19 @@ def _headless_resolver(settings, providers, agent):
         if name not in clients:
             if name not in providers:
                 return None
-            clients[name] = OpenAICompatProvider(providers[name].base_url, providers[name].api_key)
+            from hubble.providers import make_client
+            clients[name] = make_client(providers[name])
         return clients[name], fb
     return resolve
 
 
 def _fallback_client(providers, active, current):
     """fallback_model lives on the built-in hubble provider."""
-    from hubble.providers import DEFAULT_PROVIDER
+    from hubble.providers import DEFAULT_PROVIDER, make_client
     if active == DEFAULT_PROVIDER:
         return current
     cfg = providers.get(DEFAULT_PROVIDER)
-    return OpenAICompatProvider(cfg.base_url, cfg.api_key) if cfg else None
+    return make_client(cfg) if cfg else None
 
 
 def _first_run(providers, settings) -> str:

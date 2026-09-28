@@ -98,7 +98,8 @@ class ModelScanner:
     """Runs one scan at a time in a daemon thread; `status` is safe to read from the UI."""
 
     def __init__(self, base_url: str, api_key: str, concurrency: int = 6, timeout: float = 25.0,
-                 output: Path = SCAN_FILE, retry_delays=(2.0, 6.0)):
+                 output: Path = SCAN_FILE, retry_delays=(2.0, 6.0), kind: str = "openai"):
+        self.kind = kind
         self.base_url = normalize_base_url(base_url)
         self.api_key = api_key
         self.concurrency = concurrency
@@ -138,7 +139,35 @@ class ModelScanner:
             return "model scan failed"
         return ""
 
+    def _run_anthropic(self):
+        """Claude's /v1/models lists exactly the models this key can use, with their real
+        context size, so there is nothing to probe (and no per-model request to pay for)."""
+        from hubble.anthropic_provider import AnthropicProvider
+        from hubble.provider import ProviderError
+        try:
+            models = AnthropicProvider(self.base_url, self.api_key, max_retries=2).list_models()
+        except ProviderError as e:
+            self.status, self.error = "failed", str(e)[:200]
+            return
+        self.total = self.done = self.working = len(models)
+        if not models:
+            self.status, self.error = "failed", "the key has access to no models; kept the previous list"
+            return
+        save = {"timestamp": time.strftime("%Y-%m-%d %H:%M:%S"), "base_url": self.base_url,
+                "total_tested": len(models), "all_ids": [m["id"] for m in models], "working_count": len(models),
+                "working_models": [{"model": m["id"], "latency_ms": None, "owner": "anthropic", "sample": "",
+                                    "context_length": m["context_length"]} for m in models],
+                "all_results": [{"model": m["id"], "available": True, "transient": False, "reason": "listed"}
+                                for m in models]}
+        self.output.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.output.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(save, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(self.output)
+        self.status = "done"
+
     def _run(self):
+        if self.kind == "anthropic":
+            return self._run_anthropic()
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         try:
             with httpx.Client(timeout=self.timeout + 5) as client:

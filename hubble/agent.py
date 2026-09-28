@@ -294,6 +294,8 @@ class Agent:
             if not text and not result.tool_calls:
                 text = "(empty response)"  # some backends reject empty assistant messages
             message: Dict[str, Any] = {"role": "assistant", "content": text}
+            if result.raw_content:
+                message["_anthropic_content"] = result.raw_content
             if result.tool_calls:
                 message["tool_calls"] = [{"id": c.id, "type": "function",
                                           "function": {"name": c.name, "arguments": c.arguments}}
