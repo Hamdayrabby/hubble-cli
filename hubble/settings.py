@@ -26,7 +26,7 @@ DEFAULTS: Dict[str, Any] = {
     "auto_compact_ratio": 0.8,
     "max_turns": 100,             # backstop only; runs also stop when they stop making progress
     "subagent_max_turns": 150,    # backstop for sub-agents
-    "subagent_token_budget": 2000000,  # a sub-agent that has used this many tokens writes its report
+    "subagent_token_budget": 400000,   # a sub-agent that has used this many tokens writes its report
     "permission_mode": "default",
     "persona": "code",
     "shell": "auto",

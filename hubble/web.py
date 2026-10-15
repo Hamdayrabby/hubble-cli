@@ -33,6 +33,12 @@ def _strip_tags(s: str) -> str:
 def search_duckduckgo(query: str, limit: int) -> List[Dict[str, str]]:
     resp = httpx.post("https://html.duckduckgo.com/html/", data={"q": query},
                       headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT, follow_redirects=True)
+    if resp.status_code in (202, 429):
+        raise ToolError(
+            f"DuckDuckGo rate-limited the search (HTTP {resp.status_code}). "
+            "To enable reliable search, set BRAVE_API_KEY or TAVILY_API_KEY in .env, "
+            "or fetch documentation directly using web_fetch."
+        )
     if resp.status_code != 200:
         raise ToolError(f"DuckDuckGo returned HTTP {resp.status_code}")
     page = resp.text

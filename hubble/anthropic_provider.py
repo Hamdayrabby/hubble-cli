@@ -255,7 +255,10 @@ class AnthropicProvider:
                 final = stream.get_final_message()
         except self._anthropic.APIError as e:
             raise self._error(e) from None
-        return "".join(b.text for b in final.content if b.type == "text")
+        text = "".join(getattr(b, "text", "") for b in final.content if getattr(b, "type", None) == "text")
+        if not text:
+            text = "".join(getattr(b, "thinking", "") for b in final.content if getattr(b, "type", None) == "thinking")
+        return text
 
     def ping(self, model: str) -> Dict[str, Any]:
         start = time.time()

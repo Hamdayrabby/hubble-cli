@@ -123,3 +123,53 @@ def test_main_agent_stops_on_a_loop_with_a_notice(tmp_path):
     assert agent.run("go") == ""
     assert agent.last_stats.model_calls == 3
     assert any("repeating the same read_file call" in n for n in board.notices)
+
+
+def test_soft_milestone_warning_at_80_percent(tmp_path):
+    class StepBudgetSub(Sub):
+        def stream(self, model, messages, **kw):
+            r = super().stream(model, messages, **kw)
+            r.usage = {"prompt_tokens": 200, "completion_tokens": 50}
+            return r
+
+    p = StepBudgetSub(PARENT, step=lambda n: read(n))
+    board, report = run(tmp_path, p, {"subagent_max_turns": 150, "subagent_token_budget": 1000})
+    assert any("80% of research budget used" in n for n in p.notes)
+
+
+def test_dynamic_task_budget_override(tmp_path):
+    class StepBudgetSub(Sub):
+        def stream(self, model, messages, **kw):
+            r = super().stream(model, messages, **kw)
+            r.usage = {"prompt_tokens": 150, "completion_tokens": 50}
+            return r
+
+    parent_with_budget = [
+        TurnResult(tool_calls=[ToolCall("t", "task", json.dumps({"description": "dig", "prompt": "p", "budget": 600}))]),
+        TurnResult(text="done")
+    ]
+    p = StepBudgetSub(parent_with_budget, step=lambda n: read(n))
+    board, report = run(tmp_path, p, {"subagent_max_turns": 150, "subagent_token_budget": 400_000})
+    assert "token budget reached (600 tokens)" in report
+
+
+def test_observation_virtualization(tmp_path):
+    board = Board()
+    agent = Agent(None, {**BASE}, ToolContext(root=tmp_path), Permissions(), board)
+    agent.is_subagent = True
+    agent.messages = [
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "call 1"},
+        {"role": "tool", "content": "A" * 2000, "name": "read_file"},
+        {"role": "assistant", "content": "call 2"},
+        {"role": "tool", "content": "short result", "name": "read_file"},
+        {"role": "assistant", "content": "call 3"},
+        {"role": "tool", "content": "recent result", "name": "read_file"},
+        {"role": "assistant", "content": "call 4"},
+        {"role": "tool", "content": "B" * 2000, "name": "read_file"},
+    ]
+    agent._virtualize_old_observations(preserve_recent=4, max_len=1000)
+    assert len(agent.messages[2]["content"]) < 1000
+    assert "truncated for context optimization" in agent.messages[2]["content"]
+    assert len(agent.messages[8]["content"]) == 2000
+

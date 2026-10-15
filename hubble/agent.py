@@ -313,6 +313,8 @@ class Agent:
             return ""
         if hook.additional_context:
             prompt = f"{prompt}\n\n<hook-context>\n{hook.additional_context}\n</hook-context>"
+        if self.messages and self.messages[-1].get("role") == "tool":
+            self._append({"role": "assistant", "content": "[Task was cancelled by user. Standing by for new instructions.]"})
         self.ctx.begin_turn()
         self.add_user_message(prompt, images)
         user_msg = self.messages[-1]
@@ -337,6 +339,8 @@ class Agent:
                 if self.session:
                     self.session.reset(self.messages)
             self._close_dangling_tool_calls()
+            if self.messages and self.messages[-1].get("role") == "tool":
+                self._append({"role": "assistant", "content": f"[Task paused due to provider error: {e}]"})
             self.events.notice(f"API error: {e}", "error")
             return ""
         finally:
@@ -355,9 +359,10 @@ class Agent:
         # progress (repeating itself, nothing new for several steps), or -- for sub-agents -- when
         # it has used its token budget. max_turns is only a high backstop against runaways.
         max_turns = int(self.settings.get("max_turns", 100))
-        budget = int(self.settings.get("subagent_token_budget") or 2_000_000)
+        budget = int(self.settings.get("subagent_token_budget") or 400_000)
         progress = _Progress()
         schemas = [t.schema() for t in self.tools]
+        warned_80_percent = False
         for turn in range(max_turns):
             if self.cancel.is_set():
                 raise KeyboardInterrupt
@@ -366,8 +371,15 @@ class Agent:
                 self._note_on_last_tool_result(
                     "[Hubble: 3 steps left. Finish what you are doing and write your final report next; "
                     "do not start new searches.]")
+            used_tokens = stats.prompt_tokens + stats.completion_tokens
+            if self.is_subagent and not warned_80_percent and used_tokens >= budget * 0.8:
+                warned_80_percent = True
+                self._note_on_last_tool_result(
+                    f"[Hubble: ~80% of research budget used ({used_tokens:,}/{budget:,} tokens). "
+                    "Wrap up current explorations and write your final synthesis report next; "
+                    "do not start broad new searches.]")
             stop = progress.stalled()
-            if self.is_subagent and not stop and stats.prompt_tokens + stats.completion_tokens >= budget:
+            if self.is_subagent and not stop and used_tokens >= budget:
                 stop = f"token budget reached ({budget:,} tokens)"
             if stop:
                 stats.hit_step_limit = True
@@ -440,12 +452,26 @@ class Agent:
                     self._route["struggle"].note_tool(output, failed)
             self._maybe_escalate()
             progress.note(result.tool_calls)
+            if self.is_subagent and len(self.messages) > 8:
+                self._virtualize_old_observations()
 
         stats.hit_step_limit = True
         if self.is_subagent:
             return self._final_report(schemas, stats, f"step limit reached ({max_turns} steps)")
         self.events.notice(f"Stopped after {max_turns} model calls (max_turns). Say 'continue' to keep going.", "warn")
         return ""
+
+    def _virtualize_old_observations(self, preserve_recent: int = 6, max_len: int = 1000):
+        """Observation eviction (context virtualization): prune bulky older tool results
+        so cumulative prompt tokens remain bounded during long research sequences."""
+        for m in self.messages[:-preserve_recent]:
+            if m.get("role") == "tool":
+                content = m.get("content") or ""
+                if len(content) > max_len and "[... truncated for context optimization" not in content:
+                    head = content[:350]
+                    tail = content[-150:]
+                    trimmed = len(content) - 500
+                    m["content"] = f"{head}\n\n[... {trimmed:,} chars truncated for context optimization; details processed in previous turns ...]\n\n{tail}"
 
     def _note_on_last_tool_result(self, note: str):
         """Tell the model something mid-task without adding a user turn right after a tool result
@@ -705,14 +731,43 @@ class Agent:
         budget = int(int(self.settings.get("context_window", 128000)) * 3.8 * 0.6)
         transcript = truncate("\n\n".join(lines), budget)
         instruction = COMPACT_PROMPT + (f"\nFocus especially on: {focus}" if focus else "")
-        summary = self.provider.complete(
-            self.model,
-            [{"role": "system", "content": "You write precise summaries of coding sessions."},
-             {"role": "user", "content": f"<transcript>\n{transcript}\n</transcript>\n\n{instruction}"}],
-            max_tokens=2500)
+        summary = ""
+        try:
+            summary = self.provider.complete(
+                self.model,
+                [{"role": "system", "content": "You write precise summaries of coding sessions."},
+                 {"role": "user", "content": f"<transcript>\n{transcript}\n</transcript>\n\n{instruction}"}],
+                max_tokens=2500)
+        except Exception as e:
+            self.events.notice(f"Compaction call failed ({e}); falling back to structural pruning.", "dim")
+
         if not summary.strip():
-            self.events.notice("Compaction returned an empty summary; history kept.", "warn")
-            return False
+            self.events.notice("Compaction returned an empty summary; applying sliding-window pruning.", "warn")
+            # 1. Truncate historical tool results older than the last 4 messages
+            for i in range(max(0, len(self.messages) - 4)):
+                m = self.messages[i]
+                if m.get("role") == "tool" and len(m.get("content") or "") > 300:
+                    m["content"] = truncate(m.get("content") or "", 300) + "\n[earlier output trimmed for context limits]"
+
+            # 2. Prune old turns if message count remains high
+            if len(self.messages) > 6:
+                head = self.messages[0]
+                tail = self.messages[-4:]
+                prune_notice = {
+                    "role": "user",
+                    "content": "<conversation-summary>\n[Earlier intermediate steps were automatically pruned to remain within context limits.]\n</conversation-summary>\n"
+                               + ("Continue the current task from where it left off." if mid_turn else "Understood.")
+                }
+                self.messages = [head, prune_notice] + tail
+            elif len(self.messages) > 3:
+                self.messages = [self.messages[0]] + self.messages[-2:]
+
+            if self.session:
+                self.session.reset(self.messages)
+            self.context_tokens = estimate_messages(self.messages)
+            self.events.notice(f"Pruned context down to ~{self.context_tokens:,} tokens.", "dim")
+            return True
+
         head = {"role": "user", "content": f"<conversation-summary>\n{summary.strip()}\n</conversation-summary>\n"
                                            "The earlier conversation was compacted into the summary above."
                                            + (" Continue the current task from where it left off." if mid_turn else "")}
@@ -846,6 +901,8 @@ class TaskTool(Tool):
             "isolation": {"type": "string", "enum": ["none", "worktree"],
                           "description": "edit only. worktree: work in a fresh git worktree on its own branch, "
                                          "so the main checkout is untouched until you review and merge"},
+            "budget": {"type": "integer",
+                       "description": "Optional token budget for this task (default: 400,000; up to 2,000,000 for deep research or complex multi-file tasks)"},
         }
         defs = self._defs()
         if defs:
@@ -964,8 +1021,14 @@ class TaskTool(Tool):
                 # A high backstop only: sub-agents normally end on their own, or on the progress
                 # and token checks in _loop. Long runs compact their history like the main agent.
                 steps = int(p.settings.get("subagent_max_turns") or 150)
-                sub = Agent(client, {**p.settings, "model": model, "max_turns": steps,
-                                     "auto_compact_ratio": float(p.settings.get("auto_compact_ratio", 0.8))},
+                sub_settings = {**p.settings, "model": model, "max_turns": steps,
+                                "auto_compact_ratio": float(p.settings.get("auto_compact_ratio", 0.8))}
+                if args.get("budget"):
+                    try:
+                        sub_settings["subagent_token_budget"] = max(100, min(10_000_000, int(args["budget"])))
+                    except (ValueError, TypeError):
+                        pass
+                sub = Agent(client, sub_settings,
                             sub_ctx, perms, _SubagentEvents(p.events, label, key), tools=tools,
                             system_override=f"{system}\n\nWork efficiently: call several tools in one step "
                                             "when they are independent (e.g. read three files at once), "

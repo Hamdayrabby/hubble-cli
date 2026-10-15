@@ -233,6 +233,44 @@ def test_agent_compact(tmp_path):
     assert "SUMMARY" in agent.messages[0]["content"] and len(agent.messages) == 2
 
 
+def test_agent_compact_empty_summary_fallback(tmp_path):
+    agent, _ = make_agent(tmp_path, [])
+    agent.provider.complete = lambda *a, **k: ""
+    agent.messages = [
+        {"role": "user", "content": "initial task"},
+        {"role": "assistant", "content": "thinking", "tool_calls": [{"id": "1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]},
+        {"role": "tool", "content": "very long tool output " * 50, "name": "f"},
+        {"role": "assistant", "content": "next step"},
+        {"role": "user", "content": "keep going"},
+        {"role": "assistant", "content": "doing work"},
+        {"role": "user", "content": "more work"},
+    ]
+    assert agent.compact()
+    assert len(agent.messages) < 7
+    assert "<conversation-summary>" in agent.messages[1]["content"]
+
+
+def test_agent_subsequent_prompt_after_interrupt(tmp_path):
+    agent, _ = make_agent(tmp_path, [
+        TurnResult(tool_calls=[call("shell", {"command": "sleep"})]),
+        TurnResult(text="Hello, how can I help?")
+    ])
+
+    def boom(*a, **k):
+        raise KeyboardInterrupt
+    agent.events.ask = boom
+    agent.run("run long task")
+    assert agent.last_stats.interrupted
+    assert agent.messages[-1]["role"] == "tool"
+
+    agent.events.ask = lambda *a, **k: ("yes", "")
+    res = agent.run("hi")
+    assert res == "Hello, how can I help?"
+    roles = [m["role"] for m in agent.messages]
+    assert roles == ["user", "assistant", "tool", "assistant", "user", "assistant"]
+    assert "cancelled by user" in agent.messages[3]["content"]
+
+
 def test_subagent_task_is_read_only(tmp_path):
     agent, _ = make_agent(tmp_path, [
         TurnResult(tool_calls=[call("task", {"description": "look", "prompt": "find x"})]),

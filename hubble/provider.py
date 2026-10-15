@@ -318,7 +318,11 @@ class OpenAICompatProvider:
         choices = resp.json().get("choices") or []
         if not choices:
             raise ProviderError("Empty response")
-        return (choices[0].get("message") or {}).get("content") or ""
+        msg = choices[0].get("message") or {}
+        content = msg.get("content") or choices[0].get("text") or ""
+        if not content and msg.get("reasoning_content"):
+            content = msg.get("reasoning_content") or ""
+        return content
 
     def ping(self, model: str) -> Dict[str, Any]:
         start = time.time()
