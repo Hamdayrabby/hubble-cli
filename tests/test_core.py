@@ -526,13 +526,15 @@ def test_home_shows_the_hubble_starship_with_block_logo():
     def lines(g):
         return ["".join(c for c, _ in r) for r in g]
 
-    tall = lines(compose_grid(110, 30, 1.0, st, tips, "4"))
-    assert "██╗  ██╗" in tall[0]                              # the smaller block-letter logo
+    tall = lines(compose_grid(110, 30, 1.0, st, tips, "4", logo_style="block"))
+    assert "██╗  ██╗" in tall[0]                              # the block-letter logo
     ship = next(l for l in tall if "H U B B L E" in l)
     mid = (ship.index("H U B B L E") + 5) / len(ship)
     assert 0.2 < mid < 0.8                                    # flies around the middle
     short = lines(compose_grid(110, 16, 1.0, st, tips, "4"))  # e.g. a VS Code panel
     assert any("H U B B L E" in l for l in short)             # the ship still shows
+    default_grid = lines(compose_grid(110, 30, 1.0, st, tips, "4"))
+    assert "✦ H U B B L E" in default_grid[0]                  # clean wordmark default
 
 
 def test_visuals_render_at_any_width():

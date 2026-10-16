@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.3.6
+
+- **Clean Wordmark Logo & Fast 30fps Startup Animation:**
+  - Replaced the towering 6-row ANSI Shadow block-letter logo with a clean, modern 2-line wordmark (`✦ H U B B L E` with elegant letter spacing + italic tagline) that looks like a native developer tool (Antigravity/Vercel style) rather than overwhelming the terminal.
+  - Power users can still select `logo: block` or `logo: regular` in settings for the 6-row block letters, or `logo: big` / `logo: pixel` for the pixel-art logo.
+  - Doubled startup animation refresh rate from 15fps to 30fps for silky-smooth, fluid rendering of the starfield and arcade scene without frame drops.
+- **Natural, Industry-Standard Conversational Tone:**
+  - Modernized Hubble's persona and system guidelines to follow industry standards (Claude Code, Cursor, Antigravity).
+  - Eliminated robotic self-introductions ("Hi! I'm Hubble, your software engineering assistant. How can I help you today?").
+  - On open-ended greetings, Hubble now replies concisely and naturally (e.g. "Hello! What are we working on today?").
+
 ## 4.3.5
 
 - **Hidden Chain of Thought (Google Antigravity-style):**
