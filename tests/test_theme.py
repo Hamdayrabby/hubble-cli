@@ -67,3 +67,22 @@ def test_apply_theme_integration():
     assert rendered is not None
     # Reset back to terminal
     apply_theme("terminal")
+
+
+def test_get_prompt_style():
+    from hubble.theme import get_prompt_style
+    # Default terminal prompt style
+    style_term = get_prompt_style("terminal")
+    assert "completion-menu" in style_term
+    assert "completion-menu.completion.current" in style_term
+    assert "scrollbar.button" in style_term
+    assert "bottom-toolbar" in style_term
+    # Terminal menu is dark slate (not white/grey)
+    assert "#161b22" in style_term["completion-menu"]
+    assert "#58a6ff" in style_term["completion-menu.completion.current"]
+
+    # Tokyo Night prompt style
+    style_tokyo = get_prompt_style("tokyo night")
+    assert "#16161e" in style_tokyo["completion-menu"]
+    assert "#7aa2f7" in style_tokyo["completion-menu.completion.current"]
+

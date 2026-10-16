@@ -84,11 +84,12 @@ class _BlockPreview:
             return Text("▌", style="#8787af") if typing else Text("")
         lines = text.splitlines()
         room = max(4, self.owner.console.height - 4)
+        pal = get_palette(ACTIVE_THEME)
+        code_theme = getattr(pal, "code_theme", "monokai") or "monokai"
         if len(lines) > room:
-            # Taller than the screen: show the newest lines as plain text; the whole block is
-            # printed properly formatted the moment it is complete.
+            # Taller than the screen: show the newest lines
             return Text("\n".join(lines[-room:]) + (" ▌" if typing else ""))
-        return Markdown(text + (" ▌" if typing else ""), code_theme="monokai")
+        return Markdown(text + (" ▌" if typing else ""), code_theme=code_theme)
 
 
 class StreamingMarkdown:
@@ -205,9 +206,9 @@ class StreamingMarkdown:
     def _render(self, chunk: str):
         if not chunk.strip():
             return
-        if self.printed_any:
-            self.console.print()
-        self.console.print(Markdown(chunk.strip("\n"), code_theme="monokai"))
+        pal = get_palette(ACTIVE_THEME)
+        code_theme = getattr(pal, "code_theme", "monokai") or "monokai"
+        self.console.print(Markdown(chunk.strip("\n"), code_theme=code_theme))
         self.printed_any = True
 
 
@@ -345,8 +346,10 @@ class ReplEvents(Events):
         self._stop_status()
         self._end_reasoning()
         if not self.answer_started:
-            # A clear header, distinct from the cyan "you typed this" prompt line above it.
-            console.print("[bold #af87ff]✻ Hubble[/bold #af87ff]")
+            pal = get_palette(ACTIVE_THEME)
+            title_style = pal.assistant_title or "bold #af87ff"
+            console.print()
+            console.print(f"[{title_style}]✻ Hubble[/{title_style}]")
             self.answer_started = True
         if self.md:
             self.md.feed(delta)
@@ -363,7 +366,11 @@ class ReplEvents(Events):
         label = TOOL_LABELS.get(tool.name, tool.name)
         if tool.name == "task":
             return  # shown on the sub-agent board instead
-        console.print(f"[bold cyan]●[/bold cyan] [bold]{label}[/bold]([cyan]{escape(describe_call(tool, args))}[/cyan])")
+        pal = get_palette(ACTIVE_THEME)
+        icon_style = pal.tool_icon or "bold cyan"
+        desc = describe_call(tool, args)
+        target = f" [dim]{escape(desc)}[/dim]" if desc else ""
+        console.print(f"[{icon_style}]●[/{icon_style}] [bold]{label}[/bold]{target}")
         if tool.kind == "edit" and not self.approved_diff_shown:
             try:
                 diff = tool.preview(args, self.ctx)
@@ -389,7 +396,7 @@ class ReplEvents(Events):
         style = "red" if is_error else "dim"
         console.print(f"  [dim]⎿[/dim]  [{style}]{escape(headline)}[/{style}]")
         for line in extra:
-            console.print(f"     [dim]{escape(line[:160])}[/dim]")
+            console.print(f"     [dim]• {escape(line[:160])}[/dim]")
 
     def notice(self, message: str, level: str = "info"):
         self._stop_status()
@@ -413,8 +420,10 @@ class ReplEvents(Events):
                 self.board_live.start()
 
     def _ask(self, tool: Tool, args: Dict[str, Any], preview: Optional[str]) -> Tuple[str, str]:
+        from rich import box
         label = TOOL_LABELS.get(tool.name, tool.name)
-        title = f"{label} {describe_call(tool, args)}"
+        call_desc = describe_call(tool, args)
+        title = f"{label} {call_desc}".strip()
         if tool.kind == "exec":
             body: Any = Text(preview or args.get("command", ""), style="bold")
             if args.get("description"):
@@ -422,9 +431,15 @@ class ReplEvents(Events):
         elif preview and preview.startswith("---"):
             body = render_diff(preview)
         else:
-            body = Text(preview or "", style="dim")
-        console.print(Panel(body, title=f"[bold yellow]{escape(title[:100])}[/bold yellow]",
-                            title_align="left", border_style="yellow"))
+            p_text = (preview or "").strip()
+            if p_text and p_text != call_desc:
+                body = Text(p_text, style="dim")
+            elif tool.kind == "web":
+                body = Text(f"URL: {call_desc}", style="cyan")
+            else:
+                body = Text(call_desc or label, style="dim")
+        console.print(Panel(body, title=f"[bold yellow] {escape(title[:100])} [/bold yellow]",
+                            title_align="left", border_style="yellow", box=box.ROUNDED, padding=(0, 1)))
         always = {"edit": "edits", "web": tool.target(args), "mcp": tool.target(args)}.get(
             tool.kind, _command_family(args.get("command", "")))
         question = {"exec": "Run this command?", "edit": "Make this change?", "web": "Fetch this page?"}.get(
@@ -720,7 +735,9 @@ def pick(title: str, items: List[Tuple[Any, str, str]], current: Any = None, max
             mark = "●" if value == current else " "
             text = f" {mark} {label:<{label_width}} {meta}"
             if i == idx:
-                out.append(("reverse bold", f"❯{text} \n"))
+                pal = get_palette(ACTIVE_THEME)
+                sel_style = f"bg:{pal.menu_sel_bg} {pal.menu_sel_fg}"
+                out.append((sel_style, f"❯{text} \n"))
             else:
                 style = "fg:ansigray" if "unavailable" in meta else ""
                 out.append((style, f" {text}\n"))

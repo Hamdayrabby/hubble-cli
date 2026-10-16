@@ -45,6 +45,17 @@ class ColorPalette:
     dim: str
     # pygments syntax highlight theme
     code_theme: str
+    # prompt_toolkit completion menu & UI styles
+    menu_bg: str = "#161b22"
+    menu_fg: str = "#c9d1d9"
+    menu_meta_bg: str = "#161b22"
+    menu_meta_fg: str = "#8b949e"
+    menu_sel_bg: str = "#21262d"
+    menu_sel_fg: str = "#58a6ff bold"
+    menu_sel_meta_bg: str = "#21262d"
+    menu_sel_meta_fg: str = "#c9d1d9"
+    scrollbar_bg: str = "#161b22"
+    scrollbar_thumb: str = "#30363d"
 
 
 COLOR_SCHEMES: Dict[str, ColorPalette] = {
@@ -73,6 +84,16 @@ COLOR_SCHEMES: Dict[str, ColorPalette] = {
         accent="ansiblue bold",
         dim="ansigray",
         code_theme="monokai",
+        menu_bg="#161b22",
+        menu_fg="#c9d1d9",
+        menu_meta_bg="#161b22",
+        menu_meta_fg="#8b949e",
+        menu_sel_bg="#21262d",
+        menu_sel_fg="#58a6ff bold",
+        menu_sel_meta_bg="#21262d",
+        menu_sel_meta_fg="#c9d1d9",
+        scrollbar_bg="#161b22",
+        scrollbar_thumb="#38434f",
     ),
     "light": ColorPalette(
         name="light",
@@ -99,6 +120,16 @@ COLOR_SCHEMES: Dict[str, ColorPalette] = {
         accent="#0969da bold",
         dim="#6e7781",
         code_theme="friendly",
+        menu_bg="#f6f8fa",
+        menu_fg="#24292f",
+        menu_meta_bg="#f6f8fa",
+        menu_meta_fg="#6e7781",
+        menu_sel_bg="#ddf4ff",
+        menu_sel_fg="#0969da bold",
+        menu_sel_meta_bg="#ddf4ff",
+        menu_sel_meta_fg="#24292f",
+        scrollbar_bg="#f6f8fa",
+        scrollbar_thumb="#d0d7de",
     ),
     "solarized light": ColorPalette(
         name="solarized light",
@@ -125,6 +156,16 @@ COLOR_SCHEMES: Dict[str, ColorPalette] = {
         accent="#268bd2 bold",
         dim="#93a1a1",
         code_theme="solarized-light",
+        menu_bg="#fdf6e3",
+        menu_fg="#657b83",
+        menu_meta_bg="#fdf6e3",
+        menu_meta_fg="#93a1a1",
+        menu_sel_bg="#eee8d5",
+        menu_sel_fg="#268bd2 bold",
+        menu_sel_meta_bg="#eee8d5",
+        menu_sel_meta_fg="#586e75",
+        scrollbar_bg="#fdf6e3",
+        scrollbar_thumb="#93a1a1",
     ),
     "colorblind-friendly light": ColorPalette(
         name="colorblind-friendly light",
@@ -151,6 +192,16 @@ COLOR_SCHEMES: Dict[str, ColorPalette] = {
         accent="#0072b2 bold",
         dim="#666666",
         code_theme="friendly",
+        menu_bg="#f5f5f5",
+        menu_fg="#111111",
+        menu_meta_bg="#f5f5f5",
+        menu_meta_fg="#666666",
+        menu_sel_bg="#e1effa",
+        menu_sel_fg="#0072b2 bold",
+        menu_sel_meta_bg="#e1effa",
+        menu_sel_meta_fg="#111111",
+        scrollbar_bg="#f5f5f5",
+        scrollbar_thumb="#b0b0b0",
     ),
     "dark": ColorPalette(
         name="dark",
@@ -177,6 +228,16 @@ COLOR_SCHEMES: Dict[str, ColorPalette] = {
         accent="#58a6ff bold",
         dim="#8b949e",
         code_theme="monokai",
+        menu_bg="#161b22",
+        menu_fg="#c9d1d9",
+        menu_meta_bg="#161b22",
+        menu_meta_fg="#8b949e",
+        menu_sel_bg="#21262d",
+        menu_sel_fg="#58a6ff bold",
+        menu_sel_meta_bg="#21262d",
+        menu_sel_meta_fg="#c9d1d9",
+        scrollbar_bg="#161b22",
+        scrollbar_thumb="#30363d",
     ),
     "solarized dark": ColorPalette(
         name="solarized dark",
@@ -203,6 +264,16 @@ COLOR_SCHEMES: Dict[str, ColorPalette] = {
         accent="#268bd2 bold",
         dim="#586e75",
         code_theme="solarized-dark",
+        menu_bg="#002b36",
+        menu_fg="#839496",
+        menu_meta_bg="#002b36",
+        menu_meta_fg="#586e75",
+        menu_sel_bg="#073642",
+        menu_sel_fg="#268bd2 bold",
+        menu_sel_meta_bg="#073642",
+        menu_sel_meta_fg="#93a1a1",
+        scrollbar_bg="#002b36",
+        scrollbar_thumb="#586e75",
     ),
     "colorblind-friendly dark": ColorPalette(
         name="colorblind-friendly dark",
@@ -229,6 +300,16 @@ COLOR_SCHEMES: Dict[str, ColorPalette] = {
         accent="#56b4e9 bold",
         dim="#888888",
         code_theme="monokai",
+        menu_bg="#181818",
+        menu_fg="#eeeeee",
+        menu_meta_bg="#181818",
+        menu_meta_fg="#888888",
+        menu_sel_bg="#2d3a44",
+        menu_sel_fg="#56b4e9 bold",
+        menu_sel_meta_bg="#2d3a44",
+        menu_sel_meta_fg="#ffffff",
+        scrollbar_bg="#181818",
+        scrollbar_thumb="#444444",
     ),
     "tokyo night": ColorPalette(
         name="tokyo night",
@@ -255,6 +336,16 @@ COLOR_SCHEMES: Dict[str, ColorPalette] = {
         accent="#7aa2f7 bold",
         dim="#565f89",
         code_theme="dracula",
+        menu_bg="#16161e",
+        menu_fg="#c0caf5",
+        menu_meta_bg="#16161e",
+        menu_meta_fg="#565f89",
+        menu_sel_bg="#283457",
+        menu_sel_fg="#7aa2f7 bold",
+        menu_sel_meta_bg="#283457",
+        menu_sel_meta_fg="#c0caf5",
+        scrollbar_bg="#16161e",
+        scrollbar_thumb="#414868",
     ),
 }
 
@@ -297,6 +388,39 @@ def get_rich_theme(name: Optional[str] = None) -> Theme:
         "dim": _to_rich_style(p.dim),
         "link": _to_rich_style(p.link),
     })
+
+
+def get_prompt_style(name: Optional[str] = None) -> Dict[str, str]:
+    """Build prompt_toolkit style mapping for bottom toolbar, dark completion menus, and scrollbars."""
+    p = get_palette(name)
+    return {
+        # Bottom Toolbar
+        "bottom-toolbar": "noreverse bg:default #6c6c80",
+        "bottom-toolbar.text": "noreverse bg:default",
+        "tb.rule": "#303040", "tb.sep": "#44445a", "tb.dim": "#6c6c80", "tb.val": "#b8b8cc",
+        "tb.model": "bold #00d7ff", "tb.warn": "bold #ffaf00",
+        "tb.mode-default": "#b8b8cc", "tb.mode-accept-edits": "bold #5fd787",
+        "tb.mode-plan": "bold #5fafff", "tb.mode-yolo": "bold #ff5f5f",
+        "tb.in": "#87afd7", "tb.out": "#af87d7", "tb.speed": "#5fd7af",
+
+        # Autocompletion Menu Dropdown (Replaces raw white/grey default with sleek dark/theme card)
+        "completion-menu": f"bg:{p.menu_bg} {p.menu_fg}",
+        "completion-menu.completion": f"bg:{p.menu_bg} {p.menu_fg}",
+        "completion-menu.completion.current": f"bg:{p.menu_sel_bg} {p.menu_sel_fg}",
+        "completion-menu.meta.completion": f"bg:{p.menu_meta_bg} {p.menu_meta_fg}",
+        "completion-menu.meta.completion.current": f"bg:{p.menu_sel_meta_bg} {p.menu_sel_meta_fg}",
+        "completion-menu.multi-column-meta": f"bg:{p.menu_meta_bg} {p.menu_meta_fg}",
+
+        # Scrollbar
+        "scrollbar": f"bg:{p.scrollbar_bg}",
+        "scrollbar.background": f"bg:{p.scrollbar_bg}",
+        "scrollbar.button": f"bg:{p.scrollbar_thumb}",
+        "scrollbar.arrow": f"bg:{p.scrollbar_bg} {p.menu_meta_fg}",
+
+        # Inline hints and auto-suggestions
+        "auto-suggestion": f"dim {p.dim}",
+    }
+
 
 
 def render_preview_lines(palette: ColorPalette, width: int = 56) -> List[Tuple[str, str]]:

@@ -265,10 +265,13 @@ class Repl:
 
         HOME_DIR.mkdir(parents=True, exist_ok=True)
         from prompt_toolkit.styles import Style
-        return PromptSession(history=FileHistory(str(HOME_DIR / "history")), completer=ReplCompleter(self),
-                             complete_while_typing=True, key_bindings=kb, bottom_toolbar=self._toolbar,
-                             multiline=False, enable_history_search=False, refresh_interval=1.0,
-                             reserve_space_for_menu=14, style=Style.from_dict(self.TOOLBAR_STYLE))
+        from hubble.theme import get_prompt_style
+        theme_name = self.agent.settings.get("theme", "terminal")
+        self.session = PromptSession(history=FileHistory(str(HOME_DIR / "history")), completer=ReplCompleter(self),
+                                     complete_while_typing=True, key_bindings=kb, bottom_toolbar=self._toolbar,
+                                     multiline=False, enable_history_search=False, refresh_interval=1.0,
+                                     reserve_space_for_menu=14, style=Style.from_dict(get_prompt_style(theme_name)))
+        return self.session
 
     SEP = "<tb.sep>  ·  </tb.sep>"
 
@@ -347,16 +350,8 @@ class Repl:
             lines[-1].append(part)
         return [cls.SEP.join(line) for line in lines]
 
-    TOOLBAR_STYLE = {
-        # No reverse-video bar: the toolbar sits on the terminal's own background.
-        "bottom-toolbar": "noreverse bg:default #6c6c80",
-        "bottom-toolbar.text": "noreverse bg:default",
-        "tb.rule": "#303040", "tb.sep": "#44445a", "tb.dim": "#6c6c80", "tb.val": "#b8b8cc",
-        "tb.model": "bold #00d7ff", "tb.warn": "bold #ffaf00",
-        "tb.mode-default": "#b8b8cc", "tb.mode-accept-edits": "bold #5fd787",
-        "tb.mode-plan": "bold #5fafff", "tb.mode-yolo": "bold #ff5f5f",
-        "tb.in": "#87afd7", "tb.out": "#af87d7", "tb.speed": "#5fd7af",
-    }
+    from hubble.theme import get_prompt_style
+    TOOLBAR_STYLE = get_prompt_style("terminal")
 
     def _sync_scan_visuals(self):
         """Called on every prompt redraw (at least once a second): keep the home screen's model
@@ -820,7 +815,7 @@ class Repl:
         except OSError:
             saved = ""
         prov = f"{escape(provider)}: " if len(self.providers) > 1 else ""
-        console.print(f"[green]Model: {prov}{escape(name)}{saved}[/green]")
+        console.print(f"[dim]Model set to[/dim] [bold cyan]{prov}{escape(name)}[/bold cyan][dim]{saved}[/dim]")
 
     def _apply_known_context_window(self, provider: str, name: str):
         """If the switched-to model publishes its real context size (most gateways don't;
@@ -1485,6 +1480,10 @@ class Repl:
         self.agent.settings["theme"] = chosen
         save_user_setting("theme", chosen)
         apply_theme(chosen)
+        from prompt_toolkit.styles import Style
+        from hubble.theme import get_prompt_style
+        if hasattr(self, "session") and self.session:
+            self.session.style = Style.from_dict(get_prompt_style(chosen))
         console.print(f"[green]✔ Switched color scheme to [bold]{escape(chosen)}[/bold][/green]")
 
     def cmd_thinking(self, arg):

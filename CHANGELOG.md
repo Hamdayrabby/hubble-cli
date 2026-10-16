@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.3.1
+
+- **Sleek Dark Autocompletion Menu:**
+  - Overhauled `prompt_toolkit` completion dropdown styles, completely eliminating the stark default white/grey background and unstyled scrollbars when pressing `/` or `@`.
+  - Autocompletion menu is now rendered as a sleek, modern, theme-aware floating card with high-contrast accent highlights on selection, muted metadata text, and custom styled scrollbars.
+  - Dynamically bound menu styles to Hubble's color schemes in `hubble.theme` (`terminal`, `dark`, `tokyo night`, `solarized dark`, etc.) with instant live restyling upon switching themes with `/theme`.
+- **Refined Terminal Response Rhythm & Aesthetics:**
+  - Cleaned up tool execution lines: replaced noisy function-call brackets `Tool(cyan_args)` with minimalist badges `● Tool target`.
+  - Unified tool result trees with indented bullet points (`•`) and clean branch connectors (`⎿`).
+  - Added vertical breathing room before the assistant response (`✻ Hubble`) to cleanly delineate tool calls from final answers.
+  - Fixed markdown streaming double-blank-line glitches and bound syntax highlighting dynamically to the active palette's `code_theme`.
+  - Replaced harsh full-width yellow panels in permission approval prompts with modern compact `box.ROUNDED` dialogs.
+  - Replaced retro `"reverse bold"` full-block inverting in interactive pickers (`/model`, `/resume`) with modern highlighted cursor rows.
+
 ## 4.3.0
 
 - **Antigravity-Compatible Subagent Architecture (`invoke_subagent`, `define_subagent`):**
