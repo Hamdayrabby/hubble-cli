@@ -80,10 +80,33 @@ def gradient_logo() -> Text:
 
 
 def small_logo() -> Text:
+    """Tiny one-liner used in /home fallback and very short terminals."""
     out = Text("✦ ", style="bold #5f87ff")
     for i, ch in enumerate(NAME):
         out.append(ch, style=f"bold {_blend(GRADIENT, i / (len(NAME) - 1))}")
     return out
+
+
+def wordmark_logo(version: str = "", t: float = 0.0) -> List[Text]:
+    """Two-line premium wordmark: NAME in bold gradient with letter spacing + italic tagline.
+
+    This is the *default* logo: clean, readable, feels like a proper CLI brand
+    (think Antigravity / Vercel style) without towering 6-row block letters.
+    The gradient slowly slides so it stays lively in the animation.
+    """
+    # Line 1: ✦ icon + gradient letters with thin-space letter spacing for presence
+    line1 = Text()
+    line1.append("\u2726 ", style="bold #5f87ff")   # icon, cyan start of gradient
+    word = NAME.upper()
+    for i, ch in enumerate(word):
+        shade = _blend(GRADIENT, ((i / max(len(word) - 1, 1)) + t * 0.07) % 1.0)
+        line1.append(ch, style=f"bold {shade}")
+        if i < len(word) - 1:
+            line1.append("\u2009", style="")   # thin space between letters: premium wordmark feel
+    # Line 2: italic dim tagline + version
+    ver = f"  v{version}" if version else ""
+    line2 = Text.from_markup(f"[italic #6a6a8a]your model hub for code[/italic #6a6a8a][dim]{ver}[/dim]")
+    return [line1, line2]
 
 
 # ----- Hubble space scene ---------------------------------------------------
@@ -618,35 +641,55 @@ def compose_grid(width: int, height: int, t: float, status: List[Text], tips: Li
     """
     width = max(40, min(width - 1, 110))
     height = max(height, 1)
-    # Logo sizes: 1 = regular block letters (6 rows + 1 tagline = 7), 0 = one-line wordmark.
-    logo_h = {2: 9, 1: 7, 0: 1}  # letter rows + tagline
+    # Logo sizes:
+    #   "big" / "pixel" / "large" -> 2: pixel-art logo (9 rows)
+    #   "block"                   -> 1: ANSI Shadow block letters (7 rows)
+    #   default                   -> "word": 2-row gradient wordmark (clean, compact)
+    #   "small"                   -> "small": 1-row wordmark (minimum)
     if logo_style == "small":
-        top = 0
+        logo_mode = "small"
     elif logo_style in ("big", "pixel", "large"):
-        top = 2 if width >= BIG_LOGO_WIDTH + 4 else (1 if width >= 58 else 0)
+        logo_mode = "pixel"
+    elif logo_style == "block":
+        logo_mode = "block"
     else:
-        top = 1 if width >= 58 else 0
+        logo_mode = "word"   # default: clean 2-line wordmark
+
+    logo_h_map = {"pixel": 9, "block": 7, "word": 2, "small": 1}
+    logo_h = logo_h_map[logo_mode]
+
     # Richest to poorest: the starship scene comes first, then the bigger logo, then tips,
     # then status lines.
     n_status = len(status)
     shrink = [(True, n_status), (False, n_status), (False, min(2, n_status)), (False, min(1, n_status)),
               (False, 0)]
-    layouts = [(s, a, tp, n) for a in (ARCADE, None) for s in dict.fromkeys([top, 0]) for tp, n in shrink]
-    size, art, with_tips, n_status = layouts[-1]
+    # For logo degradation: pixel -> block -> word -> small
+    logo_order = {"pixel": ["pixel", "block", "word", "small"],
+                  "block": ["block", "word", "small"],
+                  "word": ["word", "small"],
+                  "small": ["small"]}
+    art_candidates = (ARCADE, None)
+    # Build layout candidates from richest to sparsest
+    layouts = [(lm, a, tp, n)
+                for a in art_candidates
+                for lm in logo_order[logo_mode]
+                for tp, n in shrink]
+    # default to sparsest
+    logo_mode_use, art, with_tips, n_status = "small", None, False, 0
 
     def art_rows(a):
         return a.height + 1 if a is not None else 0
 
-    for cand_size, cand_art, cand_tips, cand_n in layouts:
+    for cand_lm, cand_art, cand_tips, cand_n in layouts:
         if cand_art is ARCADE and width < ARCADE.width + 4:
             continue
-        need = logo_h[cand_size] + 1 + art_rows(cand_art) + cand_n + (1 + len(tips) if cand_tips else 0) + 1
+        lh = logo_h_map[cand_lm]
+        need = lh + 1 + art_rows(cand_art) + cand_n + (1 + len(tips) if cand_tips else 0) + 1
         if need <= height:
-            size, art, with_tips, n_status = cand_size, cand_art, cand_tips, cand_n
+            logo_mode_use, art, with_tips, n_status = cand_lm, cand_art, cand_tips, cand_n
             break
     status = status[:n_status]
-    use_big = size > 0
-    logo_h = logo_h[size]
+    logo_h = logo_h_map[logo_mode_use]
 
     rows_total = logo_h + 1 + art_rows(art) + len(status) + (1 + len(tips) if with_tips else 0) + 1
     rows_total = min(rows_total, height) if rows_total > height else rows_total  # never exceed the budget
@@ -654,18 +697,32 @@ def compose_grid(width: int, height: int, t: float, status: List[Text], tips: Li
     _draw_stars(grid, t)
 
     row = 0
-    if use_big:
-        logo = _big_logo_rows() if size == 2 else _logo_rows()
+    if logo_mode_use == "pixel":
+        logo = _big_logo_rows()
         lw = max(len(r) for r in logo)
         for r, line in enumerate(logo):
-            # Letters shimmer: the gradient slowly slides across the word.
             body = line.rstrip()
-            for c, ch in enumerate(body):  # opaque across the word so stars pass behind it
+            for c, ch in enumerate(body):
                 if 2 + c < width:
                     shade = _blend(GRADIENT, ((c / max(lw - 1, 1)) + t * 0.08) % 1.0)
                     grid[row + r][2 + c] = (ch, (shade if ch == "█" else f"{shade} dim") if ch != " " else "")
         _stamp_text(grid, row + len(logo), 4, Text.assemble(("your model hub for code", "italic #8787af"),
                                                     ("   v" + version, "dim")))
+    elif logo_mode_use == "block":
+        logo = _logo_rows()
+        lw = max(len(r) for r in logo)
+        for r, line in enumerate(logo):
+            body = line.rstrip()
+            for c, ch in enumerate(body):
+                if 2 + c < width:
+                    shade = _blend(GRADIENT, ((c / max(lw - 1, 1)) + t * 0.08) % 1.0)
+                    grid[row + r][2 + c] = (ch, (shade if ch == "█" else f"{shade} dim") if ch != " " else "")
+        _stamp_text(grid, row + len(logo), 4, Text.assemble(("your model hub for code", "italic #8787af"),
+                                                    ("   v" + version, "dim")))
+    elif logo_mode_use == "word":
+        wm = wordmark_logo(version, t)
+        _stamp_text(grid, row, 2, wm[0])
+        _stamp_text(grid, row + 1, 2, wm[1])
     else:
         _stamp_text(grid, row, 2, Text.assemble(small_logo(), ("  v" + version, "dim")))
     row += logo_h + 1

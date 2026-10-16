@@ -446,7 +446,7 @@ class Repl:
         if typed.strip() and cached is not None and cached[2] == budget and cached[3] == size.columns:
             return cached[1]
         elapsed = time.time() - self._home_t0
-        fps_step = int(elapsed * 15)
+        fps_step = int(elapsed * 30)
         if cached and cached[0] == fps_step and cached[2] == budget and cached[3] == size.columns:
             return cached[1]
         status, tips = self._home
