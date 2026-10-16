@@ -235,22 +235,31 @@ def _mix(dim: str, bright: str, w: float) -> str:
 _SPACE = "#101018"  # color a star fades to as it leaves a cell
 
 
-def _draw_stars(grid, t: float):
+def _draw_stars(grid, t: float, row_start: int = 0, row_end: Optional[int] = None):
     """Parallax starfield: stars drift left, nearer layers faster.
 
     Terminal cells are coarse, so each star is anti-aliased across the two cells it straddles:
     it fades out of one and into the next instead of jumping, which reads as smooth motion.
+    When row_start and row_end are specified, stars are only drawn within that vertical span.
     """
     height, width = len(grid), len(grid[0])
-    for x, row, speed, glyph, colors, phase in _stars(width, height):
+    r_start = max(0, row_start)
+    r_end = min(height, row_end if row_end is not None else height)
+    if r_end <= r_start:
+        return
+    span = r_end - r_start
+    for x, row, speed, glyph, colors, phase in _stars(width, span):
+        target_row = r_start + row
+        if target_row >= r_end:
+            continue
         pos = (x - speed * t) % width
         c0 = int(pos)
         frac = pos - c0
         twinkle = (math.sin(t * 2.2 + phase) + 1) / 2          # smooth, not on/off
         color = _mix(colors[0], colors[1], twinkle)
         for c, w in ((c0, 1 - frac), ((c0 + 1) % width, frac)):
-            if w > 0.2 and grid[row][c][0] == " ":
-                grid[row][c] = (glyph, _mix(_SPACE, color, w))
+            if w > 0.2 and grid[target_row][c][0] == " ":
+                grid[target_row][c] = (glyph, _mix(_SPACE, color, w))
 
 
 def _draw_comet(grid, row: int, t: float, period: float = 6.0):
@@ -507,8 +516,6 @@ def _stamp_text(grid, row: int, col: int, text: Text):
     last = max((i for i, (ch, _) in enumerate(cells) if ch != " "), default=-1)
     for i, (ch, style) in enumerate(cells[: last + 1]):
         if 0 <= col + i < width and 0 <= row < len(grid):
-            if ch == " " and i < len(cells) and not any(c != " " for c, _ in cells[:i]):
-                continue  # leading spaces stay transparent
             grid[row][col + i] = (ch, style)
 
 
@@ -528,18 +535,15 @@ def home_info_lines(*, version: str, provider: str, model: str, mode: str, root:
     if session_id:
         status.append(f"[bold]session[/bold]  [dim]{session_id}[/dim]")
 
-    tips = ["Ask for a change, a fix or an explanation, e.g. [italic]\"add tests for @src/utils.py\"[/italic]",
-            "Type [bold]/[/bold] for commands, [bold]@[/bold] to attach a file, [bold]![/bold] to run a shell command"]
+    tip_lines = [
+        Text.from_markup("[dim]Type [bold white]/[/bold white] for commands · [bold white]@[/bold white] to attach files · [bold white]Shift+Tab[/bold white] to cycle modes[/dim]"),
+    ]
     if memory_files:
-        tips.append(f"Project memory loaded from [bold]{escape(', '.join(memory_files))}[/bold]")
+        tip_lines.append(Text.from_markup(f"[dim]Project memory active: [bold white]{escape(', '.join(memory_files))}[/bold white][/dim]"))
+    elif resumable:
+        tip_lines.append(Text.from_markup(f"[dim]Run [bold white]/resume[/bold white] to continue an earlier session ({resumable} available)[/dim]"))
     else:
-        tips.append("Run [bold]/init[/bold] to create HUBBLE.md so Hubble remembers this project")
-    if resumable:
-        tips.append(f"[bold]/resume[/bold] continues one of {resumable} earlier session{'s' if resumable != 1 else ''} here")
-    if provider_count < 2:
-        tips.append("[bold]/provider add[/bold] connects another OpenAI-compatible API")
-    tip_lines = [Text.from_markup("[bold #af87ff]Tips for getting started[/bold #af87ff]")]
-    tip_lines += [Text.from_markup(f"[dim]{i}.[/dim] {tip}") for i, tip in enumerate(tips, 1)]
+        tip_lines.append(Text.from_markup("[dim]Run [bold white]/init[/bold white] to create HUBBLE.md (project memory)[/dim]"))
     return [Text.from_markup(s) for s in status], tip_lines
 
 
@@ -694,7 +698,6 @@ def compose_grid(width: int, height: int, t: float, status: List[Text], tips: Li
     rows_total = logo_h + 1 + art_rows(art) + len(status) + (1 + len(tips) if with_tips else 0) + 1
     rows_total = min(rows_total, height) if rows_total > height else rows_total  # never exceed the budget
     grid = _new_grid(width, max(rows_total, 1))
-    _draw_stars(grid, t)
 
     row = 0
     if logo_mode_use == "pixel":
@@ -728,9 +731,11 @@ def compose_grid(width: int, height: int, t: float, status: List[Text], tips: Li
     row += logo_h + 1
 
     if art is ARCADE:
+        _draw_stars(grid, t, row_start=row, row_end=row + ARCADE.height)
         ARCADE.draw(grid, row, t)
         row += ARCADE.height + 1
     elif isinstance(art, _Art):
+        _draw_stars(grid, t, row_start=row, row_end=row + art.height)
         _draw_comet(grid, row, t)
         _draw_scene(grid, row, t, art)
         row += art.height + 1

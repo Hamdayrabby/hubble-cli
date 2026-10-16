@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.3.8
+
+- **Ultra-Clean Home Screen (Zero Star Noise & Streamlined Hints):**
+  - Restricted the animated starfield strictly to the visual art canvas (`ARCADE` / telescope scene). Text rows (brand wordmark, status lines, command hints) are now 100% clean and free of stray floating characters, dots, or plus signs.
+  - Replaced the bulky 6-line numbered tutorial block with a clean, modern, dimmed command hints line (`Type / for commands · @ to attach files · Shift+Tab to cycle modes`).
+  - Solid character stamping guarantees no background bleeding or corruption into leading indentation or status text.
+
 ## 4.3.7
 
 - **Fix 'regular' Logo Preference Mapping:**

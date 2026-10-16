@@ -548,7 +548,7 @@ def test_visuals_render_at_any_width():
         render_home(con, version="1", provider="hubble", model="m", mode="plan", root="/x", session_id=None,
                     memory_files=[], model_count=3, provider_count=1, resumable=0, show_provider=False)
         out = con.file.getvalue()
-        assert "Tips for getting started" in out
+        assert "commands" in out
         assert ("SCORE" in out) == (width >= 64)  # the arcade scene, where there is room for it
     from hubble.banner import COMPACT, FULL, pick_art
     for art in (FULL, COMPACT):
