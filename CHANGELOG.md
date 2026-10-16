@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.3.4
+
+- **Restoration of Authentic Hubble ANSI Shadow Logo:**
+  - Fully restored the complete, authentic 6-row "ANSI Shadow" block-letter font for Hubble, fixing the previous distorted 3-row block slicing.
+  - Aligned tagline spacing and layout height calculation (`logo_h[1] = 7`) to prevent any overlap between letter shadows and arcade game elements.
+- **Configurable Logo Modes & `/logo` Command:**
+  - Added new `/logo` command in the interactive REPL to switch between:
+    - `regular`: The classic 6-row ANSI Shadow block logo with animated gradient shimmer.
+    - `small`: A clean, minimalist 1-line wordmark (`✦ Hubble v4.3.4`), ideal for compact terminals.
+  - Persistent preference saved to `~/.hubble/settings.json` under `"logo": "regular" | "small"`.
+
 ## 4.3.3
 
 - **Complete Deprecation & Removal of `aihub`:**

@@ -86,3 +86,27 @@ def test_get_prompt_style():
     assert "#16161e" in style_tokyo["completion-menu"]
     assert "#7aa2f7" in style_tokyo["completion-menu.completion.current"]
 
+
+def test_logo_selection_and_rendering():
+    from hubble.banner import compose_grid, home_info_lines, _logo_rows
+    # 1. Full 6-row ANSI Shadow block letters intact
+    rows = _logo_rows()
+    assert len(rows) == 6
+    assert "██╗  ██╗" in rows[0]
+    assert "╚═╝  ╚═╝" in rows[5]
+
+    st, tips = home_info_lines(version="4.3.4", provider="hubble", model="m", mode="default", root="x", session_id=None,
+                               memory_files=[], model_count=5, provider_count=1, resumable=0, show_provider=False)
+
+    def lines(g):
+        return ["".join(c for c, _ in r) for r in g]
+
+    # Regular block logo (size 1)
+    grid_reg = lines(compose_grid(100, 30, 1.0, st, tips, "4.3.4", logo_style="regular"))
+    assert "██╗  ██╗" in grid_reg[0]
+
+    # Small 1-line wordmark (size 0)
+    grid_small = lines(compose_grid(100, 30, 1.0, st, tips, "4.3.4", logo_style="small"))
+    assert "✦ Hubble" in grid_small[0]
+
+

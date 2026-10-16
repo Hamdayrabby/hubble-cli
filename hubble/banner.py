@@ -9,13 +9,13 @@ from rich.text import Text
 
 NAME = "Hubble"
 
-# Compact block-letter logo, 3 rows each.
+# "ANSI Shadow" style letters, 6 rows each.
 _LETTERS = {
-    "H": ["██╗  ██╗", "███████║", "██║  ██║"],
-    "U": ["██╗  ██╗", "██║  ██║", "╚██████╝"],
-    "B": ["██████╗ ", "██╔══██╗", "██████╔╝"],
-    "L": ["██╗     ", "██║     ", "███████╗"],
-    "E": ["███████╗", "█████╗  ", "███████╗"],
+    "H": ["██╗  ██╗", "██║  ██║", "███████║", "██╔══██║", "██║  ██║", "╚═╝  ╚═╝"],
+    "U": ["██╗   ██╗", "██║   ██║", "██║   ██║", "██║   ██║", "╚██████╔╝", " ╚═════╝ "],
+    "B": ["██████╗ ", "██╔══██╗", "██████╔╝", "██╔══██╗", "██████╔╝", "╚═════╝ "],
+    "L": ["██╗     ", "██║     ", "██║     ", "██║     ", "███████╗", "╚══════╝"],
+    "E": ["███████╗", "██╔════╝", "█████╗  ", "██╔══╝  ", "███████╗", "╚══════╝"],
 }
 
 GRADIENT = [(0, 215, 255), (95, 135, 255), (175, 95, 255), (255, 95, 215)]  # cyan -> violet -> pink
@@ -520,14 +520,15 @@ def home_info_lines(*, version: str, provider: str, model: str, mode: str, root:
     return [Text.from_markup(s) for s in status], tip_lines
 
 
-def compose_home(width: int, height: int, t: float, status: List[Text], tips: List[Text], version: str) -> Text:
-    return _grid_text(compose_grid(width, height, t, status, tips, version))
+def compose_home(width: int, height: int, t: float, status: List[Text], tips: List[Text], version: str,
+                 logo_style: Optional[str] = None) -> Text:
+    return _grid_text(compose_grid(width, height, t, status, tips, version, logo_style=logo_style))
 
 
 def compose_home_fragments(width: int, height: int, t: float, status: List[Text], tips: List[Text],
-                           version: str) -> List[Tuple[str, str]]:
+                           version: str, logo_style: Optional[str] = None) -> List[Tuple[str, str]]:
     """Same frame as prompt_toolkit fragments: no ANSI round trip, same-style runs merged."""
-    return _grid_fragments(compose_grid(width, height, t, status, tips, version))
+    return _grid_fragments(compose_grid(width, height, t, status, tips, version, logo_style=logo_style))
 
 
 _PT_STYLES: dict = {}
@@ -608,7 +609,8 @@ def _grid_fragments(grid) -> List[Tuple[str, str]]:
     return frags
 
 
-def compose_grid(width: int, height: int, t: float, status: List[Text], tips: List[Text], version: str):
+def compose_grid(width: int, height: int, t: float, status: List[Text], tips: List[Text], version: str,
+                 logo_style: Optional[str] = None):
     """Whole home screen on one animated starfield: logo, scene, status and tips.
 
     Picks the richest layout that fits `height` rows, dropping tips, then shrinking the scene,
@@ -616,10 +618,14 @@ def compose_grid(width: int, height: int, t: float, status: List[Text], tips: Li
     """
     width = max(40, min(width - 1, 110))
     height = max(height, 1)
-    # Logo sizes: 1 = block letters, 0 = one-line wordmark. (2, the large pixel letters, is kept
-    # for anyone who wants it back, but the HUBBLE starship is the star of the screen now.)
-    logo_h = {2: 9, 1: 4, 0: 1}  # letter rows + tagline
-    top = 1 if width >= 58 else 0
+    # Logo sizes: 1 = regular block letters (6 rows + 1 tagline = 7), 0 = one-line wordmark.
+    logo_h = {2: 9, 1: 7, 0: 1}  # letter rows + tagline
+    if logo_style == "small":
+        top = 0
+    elif logo_style in ("big", "pixel", "large"):
+        top = 2 if width >= BIG_LOGO_WIDTH + 4 else (1 if width >= 58 else 0)
+    else:
+        top = 1 if width >= 58 else 0
     # Richest to poorest: the starship scene comes first, then the bigger logo, then tips,
     # then status lines.
     n_status = len(status)
@@ -691,10 +697,10 @@ def to_ansi(text: Text, width: int) -> str:
     return con.file.getvalue()
 
 
-def render_home(console: Console, *, animate: bool = False, **info):
+def render_home(console: Console, *, animate: bool = False, logo_style: Optional[str] = None, **info):
     """Static home screen (non-interactive terminals, /home fallback)."""
     status, tips = home_info_lines(**info)
     height = console.height if console.is_terminal else 200
     console.print()
-    console.print(compose_home(console.width, max(height - 3, 12), 2.4, status, tips, info["version"]))
+    console.print(compose_home(console.width, max(height - 3, 12), 2.4, status, tips, info["version"], logo_style=logo_style))
     console.print()

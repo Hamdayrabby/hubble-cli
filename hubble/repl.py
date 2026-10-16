@@ -141,6 +141,8 @@ class Repl:
           ("permissions",), "[mode]")
         r("theme", self.cmd_theme, "Choose or switch color scheme (interactive picker or name)",
           ("color", "colors", "color-scheme"), "[name]")
+        r("logo", self.cmd_logo, "Choose logo style: regular (classic block letters) or small (1-line wordmark)",
+          ("banner-logo",), "[regular|small]")
         r("persona", self.cmd_persona, f"System persona: {', '.join(PERSONAS)}", args="[name]")
         r("resume", self.cmd_resume, "Resume a previous session of this project", ("sessions",), "[id|#]")
         r("cost", self.cmd_cost, "Token usage and context size of this session", ("tokens", "status"))
@@ -423,7 +425,7 @@ class Repl:
             self._home_t0 = time.time()
         else:
             from hubble.banner import render_home
-            render_home(console, **self._home_info())
+            render_home(console, logo_style=self.agent.settings.get("logo"), **self._home_info())
 
     def _home_message(self):
         """Prompt message for the first prompt: the whole home screen, re-rendered every frame."""
@@ -448,7 +450,8 @@ class Repl:
         if cached and cached[0] == fps_step and cached[2] == budget and cached[3] == size.columns:
             return cached[1]
         status, tips = self._home
-        frags = compose_home_fragments(size.columns, max(budget, 3), elapsed, status, tips, __version__)
+        frags = compose_home_fragments(size.columns, max(budget, 3), elapsed, status, tips, __version__,
+                                       logo_style=self.agent.settings.get("logo"))
         frame = FormattedText(frags + [("bold fg:ansicyan", "❯"), ("", " ")])
         self._home_frame = (fps_step, frame, budget, size.columns)
         return frame
@@ -1486,6 +1489,31 @@ class Repl:
         if hasattr(self, "session") and self.session:
             self.session.style = Style.from_dict(get_prompt_style(chosen))
         console.print(f"[green]✔ Switched color scheme to [bold]{escape(chosen)}[/bold][/green]")
+
+    def cmd_logo(self, arg: str = ""):
+        from hubble.settings import save_user_setting
+        target = arg.strip().lower()
+        if not target:
+            current = self.agent.settings.get("logo", "regular")
+            console.print(f"Current logo: [bold cyan]{escape(current)}[/bold cyan]. Available: [bold]regular[/bold] (classic 6-row ANSI Shadow block letters), [bold]small[/bold] (1-line clean wordmark).")
+            console.print("[dim]Usage: /logo [regular|small][/dim]")
+            return
+        if target in ("regular", "block", "default", "normal"):
+            chosen = "regular"
+            label = "regular (classic 6-row ANSI Shadow block letters)"
+        elif target in ("small", "compact", "mini", "one-line", "wordmark"):
+            chosen = "small"
+            label = "small (1-line clean wordmark: ✦ Hubble)"
+        elif target in ("big", "pixel", "large"):
+            chosen = "big"
+            label = "big (9-row pixel letters)"
+        else:
+            console.print(f"[red]Unknown logo style '{escape(arg)}'.[/red] Choose [bold]regular[/bold] or [bold]small[/bold].")
+            return
+        self.agent.settings["logo"] = chosen
+        save_user_setting("logo", chosen)
+        self._home_frame = None
+        console.print(f"[green]✔ Logo set to {label}.[/green]")
 
     def cmd_thinking(self, arg):
         ev = self.agent.events
