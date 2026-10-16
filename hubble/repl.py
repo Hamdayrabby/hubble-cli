@@ -141,8 +141,8 @@ class Repl:
           ("permissions",), "[mode]")
         r("theme", self.cmd_theme, "Choose or switch color scheme (interactive picker or name)",
           ("color", "colors", "color-scheme"), "[name]")
-        r("logo", self.cmd_logo, "Choose logo style: regular (classic block letters) or small (1-line wordmark)",
-          ("banner-logo",), "[regular|small]")
+        r("logo", self.cmd_logo, "Choose logo style: regular (clean bold wordmark), block (classic block letters), or small",
+          ("banner-logo",), "[regular|block|small]")
         r("persona", self.cmd_persona, f"System persona: {', '.join(PERSONAS)}", args="[name]")
         r("resume", self.cmd_resume, "Resume a previous session of this project", ("sessions",), "[id|#]")
         r("cost", self.cmd_cost, "Token usage and context size of this session", ("tokens", "status"))
@@ -1495,20 +1495,23 @@ class Repl:
         target = arg.strip().lower()
         if not target:
             current = self.agent.settings.get("logo", "regular")
-            console.print(f"Current logo: [bold cyan]{escape(current)}[/bold cyan]. Available: [bold]regular[/bold] (classic 6-row ANSI Shadow block letters), [bold]small[/bold] (1-line clean wordmark).")
-            console.print("[dim]Usage: /logo [regular|small][/dim]")
+            console.print(f"Current logo: [bold cyan]{escape(current)}[/bold cyan]. Available: [bold]regular[/bold] (clean bold wordmark), [bold]block[/bold] (classic 6-row ANSI Shadow block letters), [bold]small[/bold] (1-line minimal wordmark).")
+            console.print("[dim]Usage: /logo [regular|block|small][/dim]")
             return
-        if target in ("regular", "block", "default", "normal"):
+        if target in ("regular", "default", "normal", "word", "wordmark"):
             chosen = "regular"
-            label = "regular (classic 6-row ANSI Shadow block letters)"
-        elif target in ("small", "compact", "mini", "one-line", "wordmark"):
+            label = "regular (clean bold wordmark: ✦ HUBBLE)"
+        elif target in ("block", "ascii", "ansi"):
+            chosen = "block"
+            label = "block (classic 6-row ANSI Shadow block letters)"
+        elif target in ("small", "compact", "mini", "one-line"):
             chosen = "small"
-            label = "small (1-line clean wordmark: ✦ Hubble)"
+            label = "small (1-line minimal wordmark: ✦ Hubble)"
         elif target in ("big", "pixel", "large"):
             chosen = "big"
             label = "big (9-row pixel letters)"
         else:
-            console.print(f"[red]Unknown logo style '{escape(arg)}'.[/red] Choose [bold]regular[/bold] or [bold]small[/bold].")
+            console.print(f"[red]Unknown logo style '{escape(arg)}'.[/red] Choose [bold]regular[/bold], [bold]block[/bold], or [bold]small[/bold].")
             return
         self.agent.settings["logo"] = chosen
         save_user_setting("logo", chosen)

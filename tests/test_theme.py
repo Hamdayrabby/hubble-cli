@@ -101,9 +101,13 @@ def test_logo_selection_and_rendering():
     def lines(g):
         return ["".join(c for c, _ in r) for r in g]
 
-    # Regular block logo (size 1)
+    # Regular clean wordmark logo
     grid_reg = lines(compose_grid(100, 30, 1.0, st, tips, "4.3.4", logo_style="regular"))
-    assert "██╗  ██╗" in grid_reg[0]
+    assert "✦ H\u2009U\u2009B\u2009B\u2009L\u2009E" in grid_reg[0]
+
+    # Block logo (size 1)
+    grid_block = lines(compose_grid(100, 30, 1.0, st, tips, "4.3.4", logo_style="block"))
+    assert "██╗  ██╗" in grid_block[0]
 
     # Small 1-line wordmark (size 0)
     grid_small = lines(compose_grid(100, 30, 1.0, st, tips, "4.3.4", logo_style="small"))

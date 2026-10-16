@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.3.7
+
+- **Fix 'regular' Logo Preference Mapping:**
+  - Fixed an issue where saved user settings with `"logo": "regular"` were still rendering the massive 6-row ANSI Shadow block letters.
+  - Now, `regular`, `default`, `normal`, and `None` all correctly display the clean, modern bold wordmark (`✦ H U B B L E` with letter spacing and subtitle) on the top-left corner.
+  - The massive 6-row block letters are now strictly isolated to explicit `logo: block` settings.
+
 ## 4.3.6
 
 - **Clean Wordmark Logo & Fast 30fps Startup Animation:**

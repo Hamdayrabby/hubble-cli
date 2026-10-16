@@ -650,10 +650,10 @@ def compose_grid(width: int, height: int, t: float, status: List[Text], tips: Li
         logo_mode = "small"
     elif logo_style in ("big", "pixel", "large"):
         logo_mode = "pixel"
-    elif logo_style == "block":
+    elif logo_style in ("block", "ascii", "ansi"):
         logo_mode = "block"
     else:
-        logo_mode = "word"   # default: clean 2-line wordmark
+        logo_mode = "word"   # default / "regular" / "normal": clean 2-line wordmark
 
     logo_h_map = {"pixel": 9, "block": 7, "word": 2, "small": 1}
     logo_h = logo_h_map[logo_mode]
