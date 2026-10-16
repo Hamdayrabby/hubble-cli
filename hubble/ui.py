@@ -12,8 +12,8 @@ from rich.panel import Panel
 from rich.text import Text
 
 from hubble.agent import Events, describe_call
-from hubble.provider import TurnResult
 from hubble.board import SubagentBoard
+from hubble.provider import TurnResult, strip_thinking
 from hubble.spinner import start_shimmer
 from hubble.tools import Tool, ToolContext
 
@@ -72,8 +72,7 @@ def render_diff(diff: str, max_lines: int = MAX_DIFF_LINES) -> Text:
 
 
 class _BlockPreview:
-    """The block still being written, redrawn by rich.live on each refresh (~30/s), revealed word
-    by word with a cursor."""
+    """The block still being written, redrawn smoothly with a cursor."""
 
     def __init__(self, owner: "StreamingMarkdown"):
         self.owner = owner
@@ -84,12 +83,13 @@ class _BlockPreview:
             return Text("▌", style="#8787af") if typing else Text("")
         lines = text.splitlines()
         room = max(4, self.owner.console.height - 4)
-        pal = get_palette(ACTIVE_THEME)
-        code_theme = getattr(pal, "code_theme", "monokai") or "monokai"
         if len(lines) > room:
-            # Taller than the screen: show the newest lines
-            return Text("\n".join(lines[-room:]) + (" ▌" if typing else ""))
-        return Markdown(text + (" ▌" if typing else ""), code_theme=code_theme)
+            lines = lines[-room:]
+        preview_text = "\n".join(lines)
+        out = Text(preview_text)
+        if typing:
+            out.append(" ▌", style="bold #8787af")
+        return out
 
 
 class StreamingMarkdown:
@@ -101,9 +101,9 @@ class StreamingMarkdown:
     underneath them.
     """
 
-    MIN_CPS = 90          # at least ~18 words a second
-    CATCH_UP_S = 0.35     # speed = backlog / this: a big chunk is typed fast, easing off near the end
-    FINISH_S = 0.6        # at the end of a reply, spend at most this long typing out the rest
+    MIN_CPS = 280         # smooth, responsive typing (~55 words a second)
+    CATCH_UP_S = 0.12     # speed = backlog / this: accelerates quickly to match fast models
+    FINISH_S = 0.10       # at the end of a reply, finish immediately without pausing
 
     def __init__(self, con: Console):
         import threading
@@ -154,12 +154,13 @@ class StreamingMarkdown:
                 chunk, self.buf = self.buf[:cut], self.buf[cut:]
                 self.shown = max(0.0, self.shown - cut)
         if cut:
+            self._stop_live()
             self._render(chunk)
         if self.live is None and self.buf.strip() and self.console.is_terminal:
             from rich.live import Live
             from hubble.spinner import Footed
             self._last = time.time()
-            self.live = Live(Footed(_BlockPreview(self)), console=self.console, refresh_per_second=15,
+            self.live = Live(Footed(_BlockPreview(self)), console=self.console, refresh_per_second=30,
                              transient=True, vertical_overflow="crop")
             self.live.start()
 
@@ -253,7 +254,9 @@ def summarize_output(tool: Tool, output: str, is_error: bool) -> Tuple[str, List
     if tool.name == "web_fetch":
         return f"Fetched {len(output):,} chars", lines[2:3]
     if tool.name == "task":
-        return f"Report ready ({len(output):,} chars)", lines[:2]
+        cleaned = strip_thinking(output).strip()
+        lines = cleaned.splitlines()
+        return (f"Report ready ({len(cleaned):,} chars)", lines[:2]) if lines else ("Report ready", [])
     return lines[0][:200] if lines else "done", []
 
 

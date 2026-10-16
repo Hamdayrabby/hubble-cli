@@ -16,7 +16,8 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
-from hubble.provider import ProviderError, ToolCall, TurnResult, parse_arguments, pump
+from hubble.provider import (ProviderError, ToolCall, TurnResult, parse_arguments, pump,
+                             strip_thinking, _StreamThinkingFilter)
 
 DEFAULT_BASE_URL = "https://api.anthropic.com"
 # Models where the API's server-side refusal fallback is recommended (and supported).
@@ -210,6 +211,7 @@ class AnthropicProvider:
                 state["stream"].close()
 
         final = None
+        filter_ = _StreamThinkingFilter(on_text, on_reasoning, [], [])
         # The SDK read runs in a worker thread so Ctrl+C lands at once, even mid-thinking.
         for kind, value in pump(produce, abort):
             if kind == "final":
@@ -219,16 +221,16 @@ class AnthropicProvider:
             if event.type == "text" and event.text:
                 if not result.ttft_ms:
                     result.ttft_ms = round((time.time() - start) * 1000)
-                if on_text:
-                    on_text(event.text)
+                filter_.feed(event.text)
             elif event.type == "thinking" and getattr(event, "thinking", ""):
                 if on_reasoning:
                     on_reasoning(event.thinking)
+        filter_.flush()
         if final is None:
             raise ProviderError("Claude's stream ended without a final message")
         data = final.to_dict()
         blocks = data.get("content") or []
-        result.text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+        result.text = strip_thinking("".join(b.get("text", "") for b in blocks if b.get("type") == "text"))
         result.reasoning = "".join(b.get("thinking", "") for b in blocks if b.get("type") == "thinking")
         stop = data.get("stop_reason")
         result.finish_reason = STOP_REASONS.get(stop, stop)
@@ -258,7 +260,7 @@ class AnthropicProvider:
         text = "".join(getattr(b, "text", "") for b in final.content if getattr(b, "type", None) == "text")
         if not text:
             text = "".join(getattr(b, "thinking", "") for b in final.content if getattr(b, "type", None) == "thinking")
-        return text
+        return strip_thinking(text)
 
     def ping(self, model: str) -> Dict[str, Any]:
         start = time.time()

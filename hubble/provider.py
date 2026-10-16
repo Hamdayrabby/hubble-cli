@@ -156,6 +156,132 @@ def _retry_after(resp: httpx.Response) -> Optional[float]:
         return None
 
 
+def strip_thinking(text: str) -> str:
+    """Remove any thinking/reasoning XML blocks from text."""
+    if not text:
+        return ""
+    # Strip closed <think>...</think>, <thought>...</thought>, <reasoning>...</reasoning>
+    cleaned = re.sub(r"<(think|thought|reasoning)\b[^>]*>.*?</\1>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    # Strip unclosed tags (e.g. if cut off mid-thought or at stream boundary)
+    cleaned = re.sub(r"<(think|thought|reasoning)\b[^>]*>.*", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    # Strip any stray closing tags
+    cleaned = re.sub(r"</(think|thought|reasoning)>", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
+
+
+class _StreamThinkingFilter:
+    """Separates thinking tags (<think>, <thought>, <reasoning>) from visible streaming text.
+    
+    Tokens inside thinking tags are dispatched to on_reasoning and collected in reasoning_parts.
+    Tokens outside thinking tags are dispatched to on_text and collected in text_parts.
+    """
+    OPEN_TAGS = ("<think>", "<thought>", "<reasoning>")
+    CLOSE_TAGS = ("</think>", "</thought>", "</reasoning>")
+
+    def __init__(self, on_text, on_reasoning, text_parts, reasoning_parts):
+        self.on_text = on_text
+        self.on_reasoning = on_reasoning
+        self.text_parts = text_parts
+        self.reasoning_parts = reasoning_parts
+        self.in_thinking = False
+        self.buf = ""
+
+    def feed(self, chunk: str):
+        if not chunk:
+            return
+        self.buf += chunk
+        while self.buf:
+            buf_lower = self.buf.lower()
+            if not self.in_thinking:
+                earliest_pos = -1
+                matched_tag = None
+                for tag in self.OPEN_TAGS:
+                    pos = buf_lower.find(tag)
+                    if pos != -1 and (earliest_pos == -1 or pos < earliest_pos):
+                        earliest_pos = pos
+                        matched_tag = tag
+
+                if earliest_pos != -1:
+                    before = self.buf[:earliest_pos]
+                    if before:
+                        self.text_parts.append(before)
+                        if self.on_text:
+                            self.on_text(before)
+                    self.in_thinking = True
+                    self.buf = self.buf[earliest_pos + len(matched_tag):]
+                else:
+                    hold = 0
+                    for tag in self.OPEN_TAGS:
+                        for l in range(1, min(len(tag), len(self.buf) + 1)):
+                            if tag.startswith(buf_lower[-l:]):
+                                hold = max(hold, l)
+                    if hold > 0 and len(self.buf) == hold:
+                        break
+                    elif hold > 0:
+                        emit = self.buf[:-hold]
+                        self.buf = self.buf[-hold:]
+                        self.text_parts.append(emit)
+                        if self.on_text:
+                            self.on_text(emit)
+                        break
+                    else:
+                        emit = self.buf
+                        self.buf = ""
+                        self.text_parts.append(emit)
+                        if self.on_text:
+                            self.on_text(emit)
+            else:
+                earliest_pos = -1
+                matched_tag = None
+                for tag in self.CLOSE_TAGS:
+                    pos = buf_lower.find(tag)
+                    if pos != -1 and (earliest_pos == -1 or pos < earliest_pos):
+                        earliest_pos = pos
+                        matched_tag = tag
+
+                if earliest_pos != -1:
+                    thought = self.buf[:earliest_pos]
+                    if thought:
+                        self.reasoning_parts.append(thought)
+                        if self.on_reasoning:
+                            self.on_reasoning(thought)
+                    self.in_thinking = False
+                    self.buf = self.buf[earliest_pos + len(matched_tag):]
+                else:
+                    hold = 0
+                    for tag in self.CLOSE_TAGS:
+                        for l in range(1, min(len(tag), len(self.buf) + 1)):
+                            if tag.startswith(buf_lower[-l:]):
+                                hold = max(hold, l)
+                    if hold > 0 and len(self.buf) == hold:
+                        break
+                    elif hold > 0:
+                        emit = self.buf[:-hold]
+                        self.buf = self.buf[-hold:]
+                        self.reasoning_parts.append(emit)
+                        if self.on_reasoning:
+                            self.on_reasoning(emit)
+                        break
+                    else:
+                        emit = self.buf
+                        self.buf = ""
+                        self.reasoning_parts.append(emit)
+                        if self.on_reasoning:
+                            self.on_reasoning(emit)
+
+    def flush(self):
+        if self.buf:
+            if self.in_thinking:
+                self.reasoning_parts.append(self.buf)
+                if self.on_reasoning:
+                    self.on_reasoning(self.buf)
+            else:
+                self.text_parts.append(self.buf)
+                if self.on_text:
+                    self.on_text(self.buf)
+            self.buf = ""
+
+
 class OpenAICompatProvider:
     def __init__(self, base_url: str, api_key: str, client: Optional[httpx.Client] = None,
                  max_retries: int = 3):
@@ -210,6 +336,7 @@ class OpenAICompatProvider:
         result = TurnResult()
         text_parts: List[str] = []
         reasoning_parts: List[str] = []
+        filter_ = _StreamThinkingFilter(on_text, on_reasoning, text_parts, reasoning_parts)
         calls: Dict[int, Dict[str, str]] = {}
         start = time.time()
         got_delta = False
@@ -267,9 +394,7 @@ class OpenAICompatProvider:
                         if not result.ttft_ms:
                             result.ttft_ms = round((time.time() - start) * 1000)
                         got_delta = True
-                        text_parts.append(content)
-                        if on_text:
-                            on_text(content)
+                        filter_.feed(content)
                     for tc in delta.get("tool_calls") or []:
                         got_delta = True
                         slot = calls.setdefault(self._slot_index(calls, tc),
@@ -290,7 +415,8 @@ class OpenAICompatProvider:
                 raise ProviderError(f"Connection lost mid-stream: {e}") from None
             raise _Retryable(f"{type(e).__name__}: {e}") from None
 
-        result.text = "".join(text_parts)
+        filter_.flush()
+        result.text = strip_thinking("".join(text_parts))
         result.reasoning = "".join(reasoning_parts)
         for idx in sorted(calls):
             slot = calls[idx]
@@ -331,7 +457,7 @@ class OpenAICompatProvider:
         content = msg.get("content") or choices[0].get("text") or ""
         if not content and msg.get("reasoning_content"):
             content = msg.get("reasoning_content") or ""
-        return content
+        return strip_thinking(content)
 
     def ping(self, model: str) -> Dict[str, Any]:
         start = time.time()

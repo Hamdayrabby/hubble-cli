@@ -17,7 +17,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from hubble.hooks import HookRunner
 from hubble.permissions import Permissions
 from hubble.prompts import COMPACT_PROMPT, build_system_prompt, load_memory, load_lens, load_taste
-from hubble.provider import OpenAICompatProvider, ProviderError, ToolCall, TurnResult, parse_arguments
+from hubble.provider import (OpenAICompatProvider, ProviderError, ToolCall, TurnResult,
+                             parse_arguments, strip_thinking)
 from hubble.session import Session, repair_history
 from hubble.skills import Skill, SkillTool, WriteSkillTool, discover_skills, skills_prompt_block
 from hubble.tools import (READ_ONLY_TOOL_NAMES, Tool, ToolContext, ToolError, default_tools, run_tool,
@@ -442,10 +443,9 @@ class Agent:
                 if not result.text and not result.tool_calls and self._maybe_escalate():
                     continue  # retry this turn on the strong model instead of ending in silence
 
-            text = result.text
-            if not text and not result.tool_calls:
-                text = "(empty response)"  # some backends reject empty assistant messages
-            message: Dict[str, Any] = {"role": "assistant", "content": text or (None if result.tool_calls else "(empty response)")}
+            clean_text = strip_thinking(result.text)
+            content = "(empty response)" if not clean_text and not result.tool_calls else clean_text
+            message: Dict[str, Any] = {"role": "assistant", "content": content or (None if result.tool_calls else "(empty response)")}
             if result.raw_content:
                 message["_anthropic_content"] = result.raw_content
             if result.tool_calls:
@@ -458,21 +458,21 @@ class Agent:
                 if result.finish_reason == "length":
                     self.events.notice("Response hit max_tokens and was cut off. Say 'continue' or raise "
                                        "max_tokens in settings.", "warn")
-                elif not result.text:
+                elif not clean_text:
                     # The model produced neither text nor a tool call. Some backends do this after a long
                     # tool-call chain, or when a safety filter drops the reply; either way, say so instead
                     # of ending the turn in silence.
                     reason = f" (finish_reason={result.finish_reason})" if result.finish_reason else ""
                     self.events.notice(f"{self.model} returned an empty response{reason}. Try again, ask "
                                        "differently, or switch model with /model.", "warn")
-                    return result.text
+                    return ""
                 if result.finish_reason != "length":
-                    stop = self.hooks.run("Stop", {"final_text": result.text})
+                    stop = self.hooks.run("Stop", {"final_text": clean_text})
                     if stop.decision == "block":
                         self.events.notice(f"Hook says keep going: {stop.reason}", "dim")
                         self._append({"role": "user", "content": stop.reason})
                         continue
-                return result.text
+                return clean_text
 
             if self._parallel_ok(result.tool_calls):
                 outputs = self._execute_parallel(result.tool_calls)
@@ -531,9 +531,10 @@ class Agent:
             self.events.turn_end(result)
         except ProviderError:
             result = TurnResult()
-        if result.text.strip():
-            self._append({"role": "assistant", "content": result.text})
-            return result.text + f"\n\n(Note: this sub-agent was stopped early ({reason}); the report may be incomplete.)"
+        report_text = strip_thinking(result.text)
+        if report_text.strip():
+            self._append({"role": "assistant", "content": report_text})
+            return report_text + f"\n\n(Note: this sub-agent was stopped early ({reason}); the report may be incomplete.)"
         # The model still would not write one: hand back what it looked at, so nothing is lost.
         looked = []
         for m in self.messages:
@@ -1108,8 +1109,9 @@ class TaskTool(Tool):
                                     "trying the next model", "warn")
             else:
                 raise ToolError(f"sub-agent failed on every model tried: {detail.removeprefix('failed: ')}")
+            report = strip_thinking(report or "")
             limited = subs[-1].last_stats.hit_step_limit if subs else False
-            if not (report or "").strip():
+            if not report.strip():
                 status, detail = "failed", "no report"
             elif limited:
                 status, detail = "partial", f"stopped early · partial report ({len(report):,} chars)"

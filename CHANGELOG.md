@@ -1,6 +1,19 @@
 # Changelog
 
-## 4.3.4
+## 4.3.5
+
+- **Hidden Chain of Thought (Google Antigravity-style):**
+  - Added `_StreamThinkingFilter` and `strip_thinking` across all providers (`OpenAICompatProvider`, `AnthropicProvider`).
+  - Automatically intercepts `<think>...</think>`, `<thought>...</thought>`, and `<reasoning>...</reasoning>` XML tags emitted in streaming content (DeepSeek R1, Qwen 2.5/QwQ, Ollama, OpenRouter, etc.).
+  - Safely buffers tags across chunk boundaries and routes thought content to `on_reasoning` rather than visible text.
+  - When `show_reasoning` is off (default), thoughts are counted in the animated shimmer spinner (`✻ Thinking… · ↓ tokens`) and kept completely hidden from the terminal output, exactly like Google Antigravity.
+  - Subagent task reports, tool summaries, and completed responses are thoroughly sanitized of thinking tags so only clean task results and answers are displayed.
+- **Ultra-Smooth, Zero-Lag Streaming Generation:**
+  - Boosted typewriter pacing rate (`MIN_CPS = 280`, dynamic acceleration `CATCH_UP_S = 0.12`) to keep up with high-speed LLMs without artificial backlog delay.
+  - Reduced final completion flush wait (`FINISH_S = 0.10`) from 600ms to under 100ms for instantaneous turn wrap-up.
+  - Eliminated transient `Live` display collisions with `console.print()` by cleanly stopping the live preview before printing committed markdown blocks, preventing Windows Terminal cursor desync and screen jumping.
+  - Streamlined `_BlockPreview` rendering to bypass redundant Pygments/Markdown AST re-parsing on every 30fps frame, eliminating UI thread CPU spikes and frame drops.
+
 
 - **Restoration of Authentic Hubble ANSI Shadow Logo:**
   - Fully restored the complete, authentic 6-row "ANSI Shadow" block-letter font for Hubble, fixing the previous distorted 3-row block slicing.
