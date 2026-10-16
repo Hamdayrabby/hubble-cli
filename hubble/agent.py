@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from hubble.hooks import HookRunner
 from hubble.permissions import Permissions
-from hubble.prompts import COMPACT_PROMPT, build_system_prompt, load_memory
+from hubble.prompts import COMPACT_PROMPT, build_system_prompt, load_memory, load_lens, load_taste
 from hubble.provider import OpenAICompatProvider, ProviderError, ToolCall, TurnResult, parse_arguments
 from hubble.session import Session, repair_history
 from hubble.skills import Skill, SkillTool, WriteSkillTool, discover_skills, skills_prompt_block
@@ -35,7 +35,12 @@ def web_tools(settings: Dict[str, Any]) -> List[Tool]:
     if settings.get("web_tools") is False:
         return []
     from hubble.web import WebFetch, WebSearch
-    return [WebSearch(settings.get("web_search") or {}), WebFetch()]
+    cfg = dict(settings.get("web_search") or {})
+    if "base_url" not in cfg and settings.get("base_url"):
+        cfg["base_url"] = settings["base_url"]
+    if "api_key" not in cfg and settings.get("api_key"):
+        cfg["api_key"] = settings["api_key"]
+    return [WebSearch(cfg), WebFetch()]
 
 
 def estimate_tokens(text: str) -> int:
@@ -114,12 +119,15 @@ class Agent:
         self.messages: List[Dict[str, Any]] = []
         self.pinned: Dict[str, str] = {}
         self.memory = load_memory(ctx.root)
+        self.lens = load_lens(ctx.root)
+        self.taste = self.lens
         self.skills: List[Skill] = discover_skills(ctx.root) if tools is None else []
         from hubble.subagents import discover_agents
         self.agent_defs = discover_agents(ctx.root) if tools is None else []
         self.tools = tools if tools is not None else (
             default_tools() + web_tools(settings) + mcp_tools(settings, ctx.root, events)
-            + [TaskTool(self), WriteSkillTool()] + ([SkillTool(self.skills)] if self.skills else []))
+            + [TaskTool(self), InvokeSubagentTool(self), DefineSubagentTool(self), WriteSkillTool()]
+            + ([SkillTool(self.skills)] if self.skills else []))
         self.hooks = HookRunner(settings.get("hooks") or {}, ctx.root, ctx.shell_argv, events)
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
@@ -159,6 +167,30 @@ class Agent:
     def tools_by_name(self) -> Dict[str, Tool]:
         return {t.name: t for t in self.tools}
 
+    def active_tools(self) -> List[Tool]:
+        """Tools exposed to the model for the current turn, filtered by subagent_policy."""
+        if self.is_subagent:
+            return self.tools
+        policy = str(self.settings.get("subagent_policy") or "auto").lower()
+        subagent_tool_names = {"task", "invoke_subagent"}
+        if policy == "off":
+            return [t for t in self.tools if t.name not in subagent_tool_names]
+        if policy == "explicit":
+            keywords = ("agent", "subagent", "sub-agent", "delegate", "team")
+            last_user = ""
+            for m in reversed(self.messages):
+                if m.get("role") == "user":
+                    content = m.get("content")
+                    if isinstance(content, str):
+                        last_user = content
+                    elif isinstance(content, list):
+                        last_user = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
+                    break
+            has_keyword = any(re.search(rf"\b{re.escape(k)}\b", last_user, re.IGNORECASE) for k in keywords)
+            if not has_keyword and not getattr(self, "agent_defs", None):
+                return [t for t in self.tools if t.name not in subagent_tool_names]
+        return self.tools
+
     def system_prompt(self) -> str:
         if self.system_override:
             return self.system_override
@@ -179,7 +211,8 @@ class Agent:
             shell_label = shell_name(self.ctx.shell_argv)
         prompt = build_system_prompt(self.ctx.root, self.persona, shell_label, self.model,
                                      self.pinned, self.memory, self.permissions.mode,
-                                     skills_prompt_block(self.skills))
+                                     skills_prompt_block(self.skills),
+                                     lens=self.lens)
         if self.session_context:
             prompt += f"\n\n<session-start-context>\n{self.session_context}\n</session-start-context>"
         return prompt
@@ -200,6 +233,8 @@ class Agent:
 
     def reload_memory(self):
         self.memory = load_memory(self.ctx.root)
+        self.lens = load_lens(self.ctx.root)
+        self.taste = self.lens
 
     def _append(self, message: Dict[str, Any]):
         self.messages.append(message)
@@ -361,7 +396,7 @@ class Agent:
         max_turns = int(self.settings.get("max_turns", 100))
         budget = int(self.settings.get("subagent_token_budget") or 400_000)
         progress = _Progress()
-        schemas = [t.schema() for t in self.tools]
+        schemas = [t.schema() for t in self.active_tools()]
         warned_80_percent = False
         for turn in range(max_turns):
             if self.cancel.is_set():
@@ -410,7 +445,7 @@ class Agent:
             text = result.text
             if not text and not result.tool_calls:
                 text = "(empty response)"  # some backends reject empty assistant messages
-            message: Dict[str, Any] = {"role": "assistant", "content": text}
+            message: Dict[str, Any] = {"role": "assistant", "content": text or (None if result.tool_calls else "(empty response)")}
             if result.raw_content:
                 message["_anthropic_content"] = result.raw_content
             if result.tool_calls:
@@ -636,9 +671,13 @@ class Agent:
                 self.session.reset(self.messages)
 
     def _execute(self, call: ToolCall) -> str:
-        tool = self.tools_by_name.get(call.name)
+        active = {t.name: t for t in self.active_tools()}
+        tool = active.get(call.name)
         if tool is None:
-            return f"Error: unknown tool '{call.name}'. Available tools: {', '.join(self.tools_by_name)}"
+            if call.name in ("task", "invoke_subagent"):
+                policy = self.settings.get("subagent_policy", "auto")
+                return f"Error: sub-agents are disabled under the current subagent_policy ('{policy}'). Do the work directly yourself."
+            return f"Error: unknown tool '{call.name}'. Available tools: {', '.join(active)}"
         try:
             args = parse_arguments(call.arguments)
             tool.validate(args)
@@ -803,7 +842,7 @@ class _Progress:
             args = call.arguments
         return f"{call.name}:{args}"
 
-    CHANGES = {"write_file", "edit_file", "shell", "write_skill", "task"}
+    CHANGES = {"write_file", "edit_file", "apply_patch", "shell", "write_skill", "task"}
 
     def note(self, calls: List[ToolCall]):
         if not calls:
@@ -927,14 +966,22 @@ class TaskTool(Tool):
     def run(self, args, ctx):
         p = self.parent
         spec = None
-        if args.get("agent"):
-            spec = self._defs().get(str(args["agent"]).lower())
+        agent_name = args.get("agent") or args.get("subagent_type")
+        if agent_name:
+            all_defs = dict(self._defs())
+            if not isinstance(self, InvokeSubagentTool):
+                from hubble.subagents import BUILTIN_AGENTS
+                merged = dict(BUILTIN_AGENTS)
+                merged.update(all_defs)
+                all_defs = merged
+            spec = all_defs.get(str(agent_name).lower())
             if spec is None:
-                raise ToolError(f"no agent named '{args['agent']}'. Available: {', '.join(self._defs()) or '(none)'}")
+                raise ToolError(f"no agent named '{agent_name}'. Available: {', '.join(all_defs) or '(none)'}")
         edit = (spec.capability if spec else args.get("capability")) == "edit"
         isolated = None
         work_root = ctx.root
-        if edit and args.get("isolation") == "worktree":
+        iso = str(args.get("isolation") or "none").lower()
+        if edit and iso in ("worktree", "branch", "share"):
             from hubble import worktree
             slug = re.sub(r"[^a-z0-9]+", "-", (args.get("description") or "task").lower()).strip("-")[:30] or "task"
             try:
@@ -949,10 +996,10 @@ class TaskTool(Tool):
                               sandbox_network=ctx.sandbox_network, sandbox_writable=ctx.sandbox_writable,
                               allow_unsandboxed=ctx.allow_unsandboxed)
         if edit:
-            # Full toolset except task/write_skill: an edit sub-agent does its own assigned job,
+            # Full toolset except task/invoke_subagent/define_subagent/write_skill: an edit sub-agent does its own assigned job,
             # it does not spawn further sub-agents or rewrite the project's skills.
             tools = [t for t in default_tools() + web_tools(p.settings)
-                    if t.name not in ("task", "write_skill")]
+                    if t.name not in ("task", "invoke_subagent", "define_subagent", "write_skill")]
             perms = p.permissions  # same mode and rules as the parent: edits/commands ask the same way
             if isolated and perms.mode == "default":
                 # File edits land in a throwaway checkout, so they need no approval; shell commands
@@ -960,7 +1007,7 @@ class TaskTool(Tool):
                 perms = Permissions("accept-edits", allow=perms.allow, deny=perms.deny)
             system = ("You are an implementation sub-agent inside Hubble, working on one well-scoped task "
                       f"delegated to you in the workspace at {work_root}. You have read_file, write_file, "
-                      "edit_file, shell, grep, glob, list_dir and todo_write. You cannot ask the user "
+                      "edit_file, apply_patch, shell, grep, glob, list_dir, symbols and todo_write. You cannot ask the user "
                       "anything -- if the task is ambiguous, make the most reasonable choice and say what "
                       "you assumed in your final report. Verify your change (run tests/a build) before "
                       "finishing. Finish with a concise report of what you changed and how you verified it.")
@@ -1098,6 +1145,110 @@ class TaskTool(Tool):
             p.events.subagent_end(key, status, detail)
 
 
+class InvokeSubagentTool(TaskTool):
+    name = "invoke_subagent"
+    BASE_DESCRIPTION = (
+        "Invoke a specialized sub-agent for autonomous execution or deep research. "
+        "Supports pre-configured specialists (research, self, code-reviewer, test-writer), "
+        "custom specialists, parallel background execution, and workspace isolation (inherit, branch, share)."
+    )
+
+    def _defs(self):
+        from hubble.subagents import BUILTIN_AGENTS
+        defs = dict(BUILTIN_AGENTS)
+        defs.update(super()._defs())
+        return defs
+
+    @property
+    def parameters(self):
+        defs = self._defs()
+        props = {
+            "description": {"type": "string", "description": "3-5 word task title or summary"},
+            "prompt": {"type": "string", "description": "Comprehensive, detailed task instructions for the subagent"},
+            "subagent_type": {
+                "type": "string",
+                "description": f"Specialist subagent type. Available: {', '.join(sorted(defs)) if defs else 'research, self, code-reviewer, test-writer'}",
+            },
+            "capability": {
+                "type": "string",
+                "enum": ["read_only", "edit"],
+                "description": "read_only (research) or edit (implementation)",
+            },
+            "isolation": {
+                "type": "string",
+                "enum": ["inherit", "branch", "share", "none", "worktree"],
+                "description": "inherit/none (shares workspace) or branch/share/worktree (isolated git branch)",
+            },
+            "model": {"type": "string", "description": "Optional model override (e.g. 'provider:model')"},
+            "budget": {"type": "integer", "description": "Optional token budget (default: 400,000; up to 2,000,000)"},
+        }
+        if defs:
+            props["subagent_type"]["enum"] = sorted(defs)
+        return {"type": "object", "properties": props, "required": ["description", "prompt"]}
+
+    def run(self, args, ctx):
+        normalized = dict(args)
+        if "subagent_type" in normalized and "agent" not in normalized:
+            normalized["agent"] = normalized["subagent_type"]
+        iso = str(normalized.get("isolation") or "").lower()
+        if iso in ("branch", "share", "worktree"):
+            normalized["isolation"] = "worktree"
+        elif iso in ("inherit", "none"):
+            normalized["isolation"] = "none"
+        return super().run(normalized, ctx)
+
+
+class DefineSubagentTool(Tool):
+    name = "define_subagent"
+    description = (
+        "Dynamically create and register a new specialist subagent type on the fly. "
+        "The newly created subagent can immediately be called using invoke_subagent or task."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Subagent name (lowercase alphanumeric with dashes, e.g. 'sql-expert')"},
+            "description": {"type": "string", "description": "When to invoke this specialist and what it excels at"},
+            "system_prompt": {"type": "string", "description": "Comprehensive role prompt, behavioral guidelines, and report format"},
+            "capability": {"type": "string", "enum": ["read_only", "edit"], "description": "Tool permission tier: read_only or edit"},
+            "tools": {"type": "array", "items": {"type": "string"}, "description": "Optional tool restriction list"},
+            "model": {"type": "string", "description": "Optional model override for this subagent"},
+            "scope": {"type": "string", "enum": ["project", "user"], "description": "project (.hubble/agents/) or user (~/.hubble/agents/). Default: project"},
+        },
+        "required": ["name", "description", "system_prompt"],
+    }
+    kind = "write"
+
+    def __init__(self, parent: Agent):
+        self.parent = parent
+
+    def target(self, args):
+        return args.get("name", "")
+
+    def run(self, args, ctx: ToolContext):
+        from hubble.subagents import discover_agents, save_agent_definition
+        name = re.sub(r"[^a-z0-9_-]", "", args["name"].lower().strip())
+        if not name:
+            raise ToolError("Invalid agent name. Use lowercase letters, numbers, hyphens, or underscores.")
+        cap = args.get("capability") or "read_only"
+        tools_list = args.get("tools")
+        scope = args.get("scope") or "project"
+
+        save_agent_definition(
+            root=ctx.root,
+            name=name,
+            description=args["description"],
+            prompt=args["system_prompt"],
+            capability=cap,
+            tools=tools_list,
+            model=args.get("model", ""),
+            scope=scope,
+        )
+        self.parent.agent_defs = discover_agents(ctx.root)
+        return (f"Successfully defined subagent '{name}' ({scope} scope). "
+                f"You can now invoke it with invoke_subagent(subagent_type='{name}', ...) or task(agent='{name}', ...).")
+
+
 def describe_call(tool: Tool, args: Dict[str, Any]) -> str:
     """One-line human label for a tool call."""
     if tool.name == "shell":
@@ -1105,14 +1256,18 @@ def describe_call(tool: Tool, args: Dict[str, Any]) -> str:
     if tool.name in ("grep", "glob"):
         where = args.get("path")
         return f"{args.get('pattern', '')}" + (f" in {where}" if where else "")
-    if tool.name == "task":
+    if tool.name in ("task", "invoke_subagent"):
         return args.get("description", "")
+    if tool.name == "define_subagent":
+        return args.get("name", "")
     if tool.name == "web_search":
         return args.get("query", "")
     if tool.name == "web_fetch":
         return args.get("url", "")
     if tool.name == "todo_write":
         return f"{len(args.get('todos') or [])} items"
+    if tool.name == "symbols":
+        return args.get("query") or args.get("path") or "workspace outline"
     if tool.name == "read_file" and (args.get("offset") or args.get("limit")):
         return f"{args.get('path')} (from line {args.get('offset') or 1})"
     target = tool.target(args)

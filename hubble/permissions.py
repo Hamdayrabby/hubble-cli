@@ -18,7 +18,7 @@ MODE_HELP = {
     "yolo": "auto-approve everything except deny rules",
 }
 ALIASES = {"bash": "shell", "run": "shell", "edit": "edit_file", "write": "write_file",
-           "read": "read_file", "ls": "list_dir", "find": "glob", "todo": "todo_write"}
+           "patch": "apply_patch", "read": "read_file", "ls": "list_dir", "find": "glob", "todo": "todo_write"}
 # A command may ride on a pattern allow rule only if it is one plain program invocation:
 # no separators, subexpressions, redirects, variables or quotes in any shell (cmd, PowerShell, bash).
 SAFE_COMMAND = re.compile(r"^[\w ./:=+,@\-]+$")
@@ -134,6 +134,7 @@ class Permissions:
         if kind == "edit":
             self._add("edit_file")
             self._add("write_file")
-            return "edit_file, write_file"
+            self._add("apply_patch")
+            return "edit_file, write_file, apply_patch"
         self._add(tool)
         return tool

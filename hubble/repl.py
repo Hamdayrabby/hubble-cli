@@ -139,6 +139,8 @@ class Repl:
           ("providers",), "[add|remove <name>|list|secure]")
         r("mode", self.cmd_mode, "Permission mode: default, accept-edits, plan, yolo (Shift+Tab cycles)",
           ("permissions",), "[mode]")
+        r("theme", self.cmd_theme, "Choose or switch color scheme (interactive picker or name)",
+          ("color", "colors", "color-scheme"), "[name]")
         r("persona", self.cmd_persona, f"System persona: {', '.join(PERSONAS)}", args="[name]")
         r("resume", self.cmd_resume, "Resume a previous session of this project", ("sessions",), "[id|#]")
         r("cost", self.cmd_cost, "Token usage and context size of this session", ("tokens", "status"))
@@ -152,6 +154,7 @@ class Repl:
         r("diff", self.cmd_diff, "Show git diff of the workspace")
         r("init", self.cmd_init, "Generate HUBBLE.md project instructions")
         r("memory", self.cmd_memory, "Show loaded memory files (HUBBLE.md / AGENTS.md)")
+        r("lens", self.cmd_lens, "Show, init or configure developer lens & design language", ("style", "taste"), "[init|add <rule>]")
         r("add", self.cmd_add, "Pin a file into the system prompt", ("pin",), "<file>")
         r("drop", self.cmd_drop, "Unpin a file", ("unpin",), "<file>")
         r("files", self.cmd_files, "List pinned files")
@@ -176,6 +179,8 @@ class Repl:
         r("agents", self.cmd_agents, "List custom sub-agents, or create one", ("agent",), "[new <name> [user]]")
         r("plugin", self.cmd_plugin, "List, install, remove, enable or disable plugins", ("plugins",),
           "[list|install <src>|remove <name>]")
+        r("subagent", self.cmd_subagent, "Control sub-agent policy: auto, explicit, or off", ("subagents",),
+          "[auto|explicit|off]")
 
     def _load_custom_commands(self):
         """Skills become /<name>; a skill's own description is shown in /help and /<tab>."""
@@ -1054,6 +1059,61 @@ class Repl:
         for p, text in self.agent.memory:
             console.print(f"  [bold]{escape(str(p))}[/bold] [dim]({len(text.splitlines())} lines)[/dim]")
 
+    def cmd_lens(self, arg):
+        """Show, initialize, or update developer lens and design language (LENS.md)."""
+        from hubble.prompts import LENS_TEMPLATE, find_lens_files
+        parts = arg.split(maxsplit=1)
+        sub = parts[0].lower() if parts else ""
+        rest = parts[1].strip() if len(parts) > 1 else ""
+
+        target_file = self.agent.ctx.root / "LENS.md"
+
+        if sub in ("init", "create", "new"):
+            if target_file.exists():
+                console.print(f"[yellow]{escape(str(target_file))} already exists. Edit it or use '/lens add <preference>'.[/yellow]")
+                return
+            target_file.write_text(LENS_TEMPLATE, encoding="utf-8")
+            self.agent.reload_memory()
+            console.print(f"[green]Created {escape(str(target_file))} with design language and coding style guidelines.[/green]")
+            console.print("[dim]Edit LENS.md or add rules via '/lens add <preference>'.[/dim]")
+            return
+
+        if sub == "add":
+            if not rest:
+                console.print("[yellow]Usage: /lens add <preference>[/yellow]\nExample: /lens add Prefer Tailwind CSS with zinc palette and no inline styles.")
+                return
+            if not target_file.exists():
+                target_file.write_text(LENS_TEMPLATE + f"\n- {rest}\n", encoding="utf-8")
+            else:
+                existing = target_file.read_text(encoding="utf-8")
+                target_file.write_text(existing.rstrip("\n") + f"\n- {rest}\n", encoding="utf-8")
+            self.agent.reload_memory()
+            console.print(f"[green]Saved preference to {escape(str(target_file))}[/green]")
+            return
+
+        lens_files = find_lens_files(self.agent.ctx.root)
+        active_lens = getattr(self.agent, "lens", None) or getattr(self.agent, "taste", [])
+        if not lens_files and not active_lens:
+            console.print("[bold]Developer Lens & Design Language:[/bold] [dim](none configured)[/dim]")
+            console.print("Hubble interprets your codebase and styling through your personal Lens:")
+            console.print("  [bold]/lens init[/bold]         create a starter LENS.md in workspace")
+            console.print("  [bold]/lens add <rule>[/bold]    append a style, aesthetic, or design preference")
+            console.print("  Global lens: put [bold]~/.hubble/LENS.md[/bold] to apply your lens across all projects.")
+            return
+
+        console.print("[bold]Active Developer Lens & Design Language:[/bold]")
+        for p, text in active_lens:
+            lines = text.splitlines()
+            console.print(f"  [bold cyan]{escape(str(p))}[/bold cyan] [dim]({len(lines)} lines)[/dim]")
+            preview = [line for line in lines if line.strip() and not line.startswith("#")][:6]
+            for pl in preview:
+                console.print(f"    [dim]{escape(pl)}[/dim]")
+            if len(lines) > 8:
+                console.print(f"    [dim]... ({len(lines) - 6} more lines)[/dim]")
+        console.print("\n[dim]Commands: /lens add <rule> | /lens init[/dim]")
+
+    cmd_taste = cmd_lens
+
     def cmd_skills(self, arg):
         if not self.agent.skills:
             console.print("[dim]No skills yet. Ask the model to save one, or /skill new <name>.[/dim]")
@@ -1396,6 +1456,37 @@ class Repl:
         else:
             console.print(f"[red]✘ {escape(model)} failed[/red] [dim]{res['latency_ms']} ms · {escape(res['msg'])}[/dim]")
 
+    def cmd_theme(self, arg: str = ""):
+        from hubble.theme import COLOR_SCHEMES, ORDERED_SCHEMES, choose_color_scheme
+        from hubble.ui import apply_theme
+        from hubble.settings import save_user_setting
+
+        target = arg.strip().lower()
+        if target:
+            if target in COLOR_SCHEMES:
+                chosen = target
+            else:
+                matches = [s for s in ORDERED_SCHEMES if target in s]
+                if len(matches) == 1:
+                    chosen = matches[0]
+                else:
+                    console.print(f"[red]Unknown color scheme '{escape(arg)}'.[/red]")
+                    console.print(f"[dim]Available: {', '.join(ORDERED_SCHEMES)}[/dim]")
+                    return
+        else:
+            if not sys.stdin.isatty():
+                console.print(f"Available schemes: {', '.join(ORDERED_SCHEMES)}")
+                return
+            current = self.agent.settings.get("theme", "terminal")
+            chosen = choose_color_scheme(current=current)
+            if not chosen:
+                return
+
+        self.agent.settings["theme"] = chosen
+        save_user_setting("theme", chosen)
+        apply_theme(chosen)
+        console.print(f"[green]✔ Switched color scheme to [bold]{escape(chosen)}[/bold][/green]")
+
     def cmd_thinking(self, arg):
         ev = self.agent.events
         if arg.lower() in ("on", "off"):
@@ -1544,7 +1635,21 @@ class Repl:
             console.print("[red]Temperature must be between 0 and 2[/red]")
             return
         self.agent.temperature = val
-        console.print(f"[green]Temperature: {val}[/green]")
+    def cmd_subagent(self, arg):
+        policy = str(self.agent.settings.get("subagent_policy") or "auto").lower()
+        arg = arg.strip().lower()
+        if not arg:
+            console.print(f"Sub-agent policy is [bold]{policy}[/bold].")
+            console.print("  [dim]auto[/dim]      Always available; strict prompt guidelines prevent casual use")
+            console.print("  [dim]explicit[/dim]  Only active when your message explicitly mentions agent/subagent")
+            console.print("  [dim]off[/dim]       Completely disabled")
+            return
+        if arg not in ("auto", "explicit", "off"):
+            console.print(f"[red]Unknown policy '{arg}'. Use auto, explicit, or off.[/red]")
+            return
+        self.agent.settings["subagent_policy"] = arg
+        save_user_setting("subagent_policy", arg)
+        console.print(f"Sub-agent policy set to [bold green]{arg}[/bold green].")
 
     def cmd_config(self, arg):
         s = self.agent.settings

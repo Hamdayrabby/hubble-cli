@@ -18,7 +18,8 @@ HOME_DIR = Path(os.environ.get("HUBBLE_HOME", Path.home() / ".hubble"))
 
 DEFAULTS: Dict[str, Any] = {
     "model": DEFAULT_MODEL,
-    "base_url": "https://aihub.071129.xyz/v1",
+    "base_url": "https://api.openai.com/v1",
+    "theme": "terminal",
     "temperature": 0.3,
     "max_tokens": 8192,
     "context_window": 128000,   # only a compaction-trigger estimate, not a hard cap the code enforces
@@ -27,6 +28,7 @@ DEFAULTS: Dict[str, Any] = {
     "max_turns": 100,             # backstop only; runs also stop when they stop making progress
     "subagent_max_turns": 150,    # backstop for sub-agents
     "subagent_token_budget": 400000,   # a sub-agent that has used this many tokens writes its report
+    "subagent_policy": "auto",    # "auto" | "explicit" | "off"
     "permission_mode": "default",
     "persona": "code",
     "shell": "auto",
@@ -59,10 +61,11 @@ class ConfigError(Exception):
 
 
 _ENV_PREFIXES = ("HUBBLE_", "AIHUB_")  # AIHUB_ is the pre-rename name, kept as a fallback
+_ALLOWED_ENV_KEYS = ("BRAVE_API_KEY", "TAVILY_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL")
 
 
 def _read_env_file(path: Path) -> Dict[str, str]:
-    """Only HUBBLE_*/AIHUB_* keys are read, so other secrets in a .env never leak into os.environ."""
+    """Read HUBBLE_*/AIHUB_* variables and permitted search/provider keys from a .env file."""
     out: Dict[str, str] = {}
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -72,7 +75,7 @@ def _read_env_file(path: Path) -> Dict[str, str]:
                     continue
                 key, val = line.split("=", 1)
                 key = key.strip().removeprefix("export ").strip()
-                if key.startswith(_ENV_PREFIXES):
+                if key.startswith(_ENV_PREFIXES) or key in _ALLOWED_ENV_KEYS:
                     out[key] = val.strip().strip("'\"")
     except OSError:
         pass
@@ -169,14 +172,22 @@ def load_settings(root: Path, overrides: Optional[Dict[str, Any]] = None,
     for env_file in (HOME_DIR / ".env", PROJECT_DIR / ".env"):
         for k, v in _read_env_file(env_file).items():
             env.setdefault(k, v)
-    env.update({k: v for k, v in os.environ.items() if k.startswith(_ENV_PREFIXES)})
+    env.update({k: v for k, v in os.environ.items() if k.startswith(_ENV_PREFIXES) or k in _ALLOWED_ENV_KEYS})
+
+    for k in _ALLOWED_ENV_KEYS:
+        if k in env and k not in os.environ:
+            os.environ[k] = env[k]
+    if env.get("TAVILY_API_KEY"):
+        settings.setdefault("web_search", {})["tavily_api_key"] = env["TAVILY_API_KEY"]
+    if env.get("BRAVE_API_KEY"):
+        settings.setdefault("web_search", {})["brave_api_key"] = env["BRAVE_API_KEY"]
 
     if not settings.get("api_key"):
-        settings["api_key"] = env.get("HUBBLE_API_KEY") or env.get("AIHUB_API_KEY", "")
+        settings["api_key"] = env.get("HUBBLE_API_KEY") or env.get("OPENAI_API_KEY") or env.get("AIHUB_API_KEY", "")
     if (overrides is None or overrides.get("model") is None) and env.get("HUBBLE_MODEL"):
         settings["model"] = env["HUBBLE_MODEL"]
     if overrides is None or overrides.get("base_url") is None:
-        settings["base_url"] = env.get("HUBBLE_BASE_URL") or env.get("AIHUB_BASE_URL") or settings["base_url"]
+        settings["base_url"] = env.get("HUBBLE_BASE_URL") or env.get("OPENAI_BASE_URL") or env.get("AIHUB_BASE_URL") or settings["base_url"]
     return settings
 
 

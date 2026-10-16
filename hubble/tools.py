@@ -14,7 +14,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 MAX_OUTPUT_CHARS = 30000
 MAX_READ_LINES = 2000
@@ -399,6 +399,229 @@ class EditFile(Tool):
         ctx.read_mtimes[str(p)] = p.stat().st_mtime
         n = count if args.get("replace_all") else 1
         return f"Edited {ctx.rel(p)} ({n} replacement{'s' if n != 1 else ''})"
+
+
+@dataclass
+class _DiffHunk:
+    old_start: int
+    old_lines: int
+    new_start: int
+    new_lines: int
+    lines: List[str]
+
+
+_HUNK_RE = re.compile(r"^@@\s*-(\d+)(?:,(\d+))?\s*\+(\d+)(?:,(\d+))?\s*@@(?:.*)?$")
+
+
+def parse_unified_diff(patch_str: str) -> List[_DiffHunk]:
+    """Parse a unified diff into a list of _DiffHunk objects.
+
+    Tolerant to git diff headers (diff --git, index, ---, +++), omitted line counts,
+    and blank context lines that omit leading spaces.
+    """
+    lines = patch_str.splitlines()
+    hunks: List[_DiffHunk] = []
+    current_hunk: Optional[_DiffHunk] = None
+
+    for raw_line in lines:
+        m = _HUNK_RE.match(raw_line)
+        if m:
+            if current_hunk is not None:
+                hunks.append(current_hunk)
+            old_s = int(m.group(1))
+            old_l = int(m.group(2)) if m.group(2) is not None else (1 if old_s != 0 else 0)
+            new_s = int(m.group(3))
+            new_l = int(m.group(4)) if m.group(4) is not None else (1 if new_s != 0 else 0)
+            current_hunk = _DiffHunk(old_start=old_s, old_lines=old_l,
+                                     new_start=new_s, new_lines=new_l, lines=[])
+            continue
+
+        if current_hunk is None:
+            continue
+
+        if raw_line.startswith((" ", "+", "-", "\\")):
+            current_hunk.lines.append(raw_line)
+        elif raw_line == "":
+            current_hunk.lines.append(" ")
+        elif raw_line.startswith(("diff --git", "index ", "--- ", "+++ ")):
+            continue
+        else:
+            current_hunk.lines.append(" " + raw_line)
+
+    if current_hunk is not None:
+        hunks.append(current_hunk)
+
+    if not hunks:
+        raise ToolError("No unified diff hunks found in patch (expected '@@ -start,len +start,len @@').")
+    return hunks
+
+
+def apply_unified_patch_with_count(original_text: str, patch_str: str, path_for_err: str = "") -> Tuple[str, int]:
+    """Apply a unified diff patch string to original_text.
+
+    Returns (updated_text, hunk_count).
+    Supports fuzzy offset matching (up to +-100 lines), stripped whitespace matching,
+    and CRLF/LF line ending preservation.
+    """
+    hunks = parse_unified_diff(patch_str)
+    is_crlf = "\r\n" in original_text
+    has_trailing_newline = (not original_text) or original_text.endswith("\n") or original_text.endswith("\r\n")
+
+    # Check if the last hunk ends with a '\ No newline at end of file' directive
+    for hline in reversed(hunks[-1].lines):
+        if hline.startswith("\\"):
+            has_trailing_newline = False
+            break
+        elif hline.startswith(("+", "-")):
+            break
+
+    file_lines = original_text.replace("\r\n", "\n").splitlines()
+    line_offset = 0
+
+    for hunk in hunks:
+        old_hunk_lines: List[str] = []
+        new_hunk_lines: List[str] = []
+        for hline in hunk.lines:
+            if hline.startswith(" "):
+                c = hline[1:]
+                old_hunk_lines.append(c)
+                new_hunk_lines.append(c)
+            elif hline.startswith("-"):
+                old_hunk_lines.append(hline[1:])
+            elif hline.startswith("+"):
+                new_hunk_lines.append(hline[1:])
+            elif hline.startswith("\\"):
+                continue
+
+        target_idx = max(0, min(hunk.old_start - 1 + line_offset, len(file_lines)))
+
+        if not old_hunk_lines:
+            # Pure insertion
+            found_idx = target_idx
+        else:
+            def _matches(idx: int, fuzzy: bool) -> bool:
+                if idx < 0 or idx + len(old_hunk_lines) > len(file_lines):
+                    return False
+                if not fuzzy:
+                    return all(file_lines[idx + j] == old_hunk_lines[j] for j in range(len(old_hunk_lines)))
+                return all(file_lines[idx + j].rstrip() == old_hunk_lines[j].rstrip() for j in range(len(old_hunk_lines)))
+
+            found_idx = None
+            # 1. Exact match at target_idx
+            if _matches(target_idx, fuzzy=False):
+                found_idx = target_idx
+            else:
+                # 2. Offset scan near target_idx (exact)
+                max_scan = max(100, len(file_lines))
+                for d in range(1, max_scan + 1):
+                    if target_idx + d <= len(file_lines) and _matches(target_idx + d, fuzzy=False):
+                        found_idx = target_idx + d
+                        break
+                    if target_idx - d >= 0 and _matches(target_idx - d, fuzzy=False):
+                        found_idx = target_idx - d
+                        break
+
+            # 3. Fuzzy match (ignoring trailing whitespace)
+            if found_idx is None:
+                if _matches(target_idx, fuzzy=True):
+                    found_idx = target_idx
+                else:
+                    max_scan = max(100, len(file_lines))
+                    for d in range(1, max_scan + 1):
+                        if target_idx + d <= len(file_lines) and _matches(target_idx + d, fuzzy=True):
+                            found_idx = target_idx + d
+                            break
+                        if target_idx - d >= 0 and _matches(target_idx - d, fuzzy=True):
+                            found_idx = target_idx - d
+                            break
+
+            # 4. Search entire file if still not found
+            if found_idx is None:
+                exact_hits = [i for i in range(len(file_lines) - len(old_hunk_lines) + 1)
+                              if _matches(i, fuzzy=False)]
+                if len(exact_hits) == 1:
+                    found_idx = exact_hits[0]
+                elif not exact_hits:
+                    fuzzy_hits = [i for i in range(len(file_lines) - len(old_hunk_lines) + 1)
+                                  if _matches(i, fuzzy=True)]
+                    if len(fuzzy_hits) == 1:
+                        found_idx = fuzzy_hits[0]
+
+            if found_idx is None:
+                preview = "\n".join(f"  {l}" for l in old_hunk_lines[:6])
+                more = f"\n  ... ({len(old_hunk_lines) - 6} more lines)" if len(old_hunk_lines) > 6 else ""
+                name = f"'{path_for_err}'" if path_for_err else "file"
+                raise ToolError(
+                    f"Hunk @@ -{hunk.old_start},{hunk.old_lines} +{hunk.new_start},{hunk.new_lines} @@ "
+                    f"failed to match context in {name}.\nExpected lines:\n{preview}{more}"
+                )
+
+        file_lines[found_idx: found_idx + len(old_hunk_lines)] = new_hunk_lines
+        line_offset = found_idx + len(new_hunk_lines) - (hunk.old_start - 1 + len(old_hunk_lines))
+
+    nl = "\r\n" if is_crlf else "\n"
+    new_text = nl.join(file_lines)
+    if has_trailing_newline and file_lines:
+        new_text += nl
+    return new_text, len(hunks)
+
+
+def apply_unified_patch(original_text: str, patch_str: str, path_for_err: str = "") -> str:
+    updated, _ = apply_unified_patch_with_count(original_text, patch_str, path_for_err=path_for_err)
+    return updated
+
+
+class ApplyPatch(Tool):
+    name = "apply_patch"
+    description = (
+        "Apply a unified diff patch to a file. Supports standard unified diff format "
+        "(with @@ -start,len +start,len @@ hunk headers). Context lines (' ') verify position. "
+        "More robust for multi-site or non-contiguous edits than single edit_file calls."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "File path relative to the workspace root"},
+            "patch": {"type": "string", "description": "Unified diff patch content including hunk headers"},
+        },
+        "required": ["path", "patch"],
+    }
+    kind = "edit"
+
+    def _apply(self, args, ctx):
+        p = ctx.resolve(args["path"])
+        ctx.check_secret(p)
+        if p.is_dir():
+            raise ToolError(f"'{args['path']}' is a directory")
+        if not p.is_file():
+            raise ToolError(f"File not found: {args['path']}. Use write_file to create it.")
+        text = _read_text_strict(p)
+        patch = args.get("patch", "")
+        if not patch or not patch.strip():
+            raise ToolError("patch is empty")
+        updated, hunk_count = apply_unified_patch_with_count(text, patch, path_for_err=ctx.rel(p))
+        return p, text, updated, hunk_count
+
+    def precheck(self, args, ctx):
+        p, _, _, _ = self._apply(args, ctx)
+        _require_fresh_read(p, ctx, "patch")
+
+    def preview(self, args, ctx):
+        try:
+            p, text, updated, _ = self._apply(args, ctx)
+        except ToolError as e:
+            return f"(patch will fail: {e})"
+        return unified_diff(text, updated, ctx.rel(p))
+
+    def run(self, args, ctx):
+        p, text, updated, count = self._apply(args, ctx)
+        _require_fresh_read(p, ctx, "patch")
+        if text == updated:
+            return f"No changes applied to {ctx.rel(p)} (patch resulted in identical content)"
+        ctx.snapshot(p)
+        _write_text(p, updated)
+        ctx.read_mtimes[str(p)] = p.stat().st_mtime
+        return f"Applied {count} hunk{'s' if count != 1 else ''} to {ctx.rel(p)} ({len(updated.splitlines())} lines)"
 
 
 class Shell(Tool):
@@ -790,11 +1013,60 @@ class TodoWrite(Tool):
         return f"Todo list updated ({done}/{len(todos)} completed)"
 
 
+class SymbolsTool(Tool):
+    name = "symbols"
+    description = (
+        "Search codebase symbols (classes, functions, methods, types, interfaces) across the "
+        "workspace using fast AST/symbol indexing, or outline a specific file. "
+        "Use this before broad grepping to locate definitions directly."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Symbol name or substring to search for across the workspace"},
+            "path": {"type": "string", "description": "Optional file path to return a symbol outline for that file"},
+            "limit": {"type": "integer", "description": "Max symbols to return (default 30)"},
+        },
+    }
+    kind = "read"
+
+    def run(self, args: Dict[str, Any], ctx: ToolContext) -> str:
+        from hubble.indexer import SymbolIndex
+        idx = SymbolIndex(ctx.root)
+        limit = max(1, min(int(args.get("limit") or 30), 100))
+
+        if args.get("path"):
+            p = ctx.resolve(args["path"])
+            ctx.check_secret(p)
+            rel = ctx.rel(p)
+            syms = idx.outline(rel)
+            if not syms:
+                return f"No symbols found in {rel} (or file type not supported for symbol extraction)."
+            lines = [f"[{rel} symbols ({len(syms)})]"]
+            for s in syms[:limit]:
+                lines.append(f"  line {s.line}: [{s.kind}] {s.name}{s.signature or ''}" + (f"  # {s.docstring}" if s.docstring else ""))
+            if len(syms) > limit:
+                lines.append(f"  ... {len(syms) - limit} more symbols")
+            return "\n".join(lines)
+
+        query = args.get("query", "").strip()
+        if query:
+            syms = idx.search(query, limit=limit)
+            if not syms:
+                return f"No symbols matching '{query}' found in workspace. Try grep to search raw text."
+            lines = [f"[Found {len(syms)} symbol(s) matching '{query}']"]
+            for s in syms:
+                lines.append("  " + s.format_line())
+            return "\n".join(lines)
+
+        return f"[Workspace symbol outline]\n{idx.repo_map(max_symbols=limit)}"
+
+
 def default_tools() -> List[Tool]:
-    return [ReadFile(), WriteFile(), EditFile(), Shell(), Grep(), Glob(), ListDir(), TodoWrite()]
+    return [ReadFile(), WriteFile(), EditFile(), ApplyPatch(), Shell(), Grep(), Glob(), ListDir(), SymbolsTool(), TodoWrite()]
 
 
-READ_ONLY_TOOL_NAMES = {"read_file", "grep", "glob", "list_dir"}
+READ_ONLY_TOOL_NAMES = {"read_file", "grep", "glob", "list_dir", "symbols"}
 
 
 def run_tool(tool: Tool, args: Dict[str, Any], ctx: ToolContext) -> tuple:

@@ -36,8 +36,8 @@ def load_env_file(env_path: Path = None):
 # Automatically load from .env
 load_env_file()
 
-# Base URL (non-sensitive endpoint default)
-DEFAULT_BASE_URL = "https://aihub.071129.xyz/v1"
+# Base URL (standard OpenAI-compatible endpoint default)
+DEFAULT_BASE_URL = "https://api.openai.com/v1"
 BASE_URL = os.environ.get("HUBBLE_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
 
 # API Key (loaded strictly from environment or .env, never hardcoded)

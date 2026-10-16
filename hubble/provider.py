@@ -105,16 +105,25 @@ def _short_id(raw: str) -> str:
 
 
 def normalize_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Rewrite tool_call ids so a history built with one model stays valid for another."""
+    """Rewrite tool_call ids and sanitize empty content so history stays valid across providers."""
     out = []
     for m in messages:
         m = {k: v for k, v in m.items() if not k.startswith("_")}  # provider-private keys stay local
         if m.get("tool_calls"):
             m["tool_calls"] = [{**tc, "id": _short_id(tc["id"])} for tc in m["tool_calls"]]
-            if not m.get("content"):
-                m["content"] = ""
+            # For assistant tool calls, OpenAI spec requires content to be null (None) when no text
+            # was produced. Sending empty string "" fails on strict gateways (NVIDIA NIM, Google/LiteLLM)
+            # with 'Empty content is not allowed for assistant messages'.
+            if not m.get("content") or (isinstance(m["content"], str) and not m["content"].strip()):
+                m["content"] = None
+        elif m.get("role") == "assistant":
+            # If an assistant message has no tool calls and no content, ensure non-empty text
+            if not m.get("content") or (isinstance(m["content"], str) and not m["content"].strip()):
+                m["content"] = "(empty response)"
         if m.get("role") == "tool":
             m["tool_call_id"] = _short_id(m["tool_call_id"])
+            if not m.get("content"):
+                m["content"] = "(no output)"
         out.append(m)
     return out
 

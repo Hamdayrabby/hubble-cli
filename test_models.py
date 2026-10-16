@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Model Availability Tester for AIHub API (https://aihub.071129.xyz/)
+Model Availability Tester for OpenAI-compatible APIs (OpenAI, DeepSeek, custom gateways, etc.)
 
 Fetches the complete model registry and tests each model asynchronously
 by sending a lightweight completion request. Verifies HTTP status, response
@@ -240,7 +240,7 @@ async def run_scanner(
     verbose: bool = False
 ):
     print(colorize("\n" + "=" * 65, Colors.CYAN))
-    print(colorize("   AIHub API Model Availability & Health Checker", Colors.BOLD + Colors.CYAN))
+    print(colorize("   OpenAI-Compatible Model Availability & Health Checker", Colors.BOLD + Colors.CYAN))
     print(colorize("=" * 65, Colors.CYAN))
     print(f"Target Base URL : {colorize(base_url, Colors.BOLD)}")
     masked_key = api_key[:7] + "..." + api_key[-4:] if len(api_key) > 12 else "******"
@@ -388,7 +388,7 @@ async def run_scanner(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Test model availability and latency on AIHub API.",
+        description="Test model availability and latency on OpenAI-compatible API.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

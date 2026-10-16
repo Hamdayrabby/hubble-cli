@@ -110,7 +110,7 @@ def test_normalize_ids_consistent():
         {"role": "tool", "tool_call_id": "call-long-id-123", "content": "ok"}]
     out = normalize_messages(msgs)
     assert out[0]["tool_calls"][0]["id"] == out[1]["tool_call_id"]
-    assert len(out[1]["tool_call_id"]) == 9 and out[0]["content"] == ""
+    assert len(out[1]["tool_call_id"]) == 9 and out[0]["content"] is None
 
 
 def test_parse_arguments_lenient():
@@ -450,7 +450,7 @@ def test_provider_registry(tmp_path, monkeypatch):
     assert pv.normalize_base_url("http://localhost:11434") == "http://localhost:11434/v1"
     pv.save_provider(pv.ProviderConfig("groq", "https://api.groq.com/openai/v1", "k1"))
     pv.save_listing("groq", "https://api.groq.com/openai/v1", ["llama-a", "llama-b"])
-    provs = pv.load_providers({"api_key": "main", "base_url": "https://aihub.071129.xyz/v1"})
+    provs = pv.load_providers({"api_key": "main", "base_url": "https://api.openai.com/v1"})
     assert list(provs) == ["aihub", "groq"] and provs["groq"].api_key == "k1"  # built-in = the AIHub gateway
     assert pv.normalize_provider_name("hubble") == "aihub"   # name used up to 4.1, still recognized
     assert pv.normalize_provider_name(None) == "aihub" and pv.normalize_provider_name("groq") == "groq"

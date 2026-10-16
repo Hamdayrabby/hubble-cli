@@ -24,27 +24,45 @@ if sys.platform == "win32":
         except (AttributeError, ValueError):
             pass
 
+from hubble.theme import get_palette, get_rich_theme
+
 console = Console(highlight=False)
 err_console = Console(stderr=True, highlight=False)
 
-TOOL_LABELS = {"read_file": "Read", "write_file": "Write", "edit_file": "Edit", "shell": "Shell",
-               "grep": "Search", "glob": "Glob", "list_dir": "List", "todo_write": "Todos", "task": "Task",
-               "web_search": "Web Search", "web_fetch": "Fetch"}
+ACTIVE_THEME = "terminal"
+
+
+def apply_theme(name: str):
+    """Update active theme across consoles and diff renderers."""
+    global ACTIVE_THEME
+    ACTIVE_THEME = name or "terminal"
+    theme = get_rich_theme(ACTIVE_THEME)
+    console._theme = theme
+    err_console._theme = theme
+
+
+TOOL_LABELS = {"read_file": "Read", "write_file": "Write", "edit_file": "Edit", "apply_patch": "Patch",
+               "shell": "Shell", "grep": "Search", "glob": "Glob", "list_dir": "List", "symbols": "Symbols",
+               "todo_write": "Todos", "task": "Task", "invoke_subagent": "Subagent",
+               "define_subagent": "Define Subagent", "web_search": "Web Search", "web_fetch": "Fetch"}
 MAX_DIFF_LINES = 120
 
 
 def render_diff(diff: str, max_lines: int = MAX_DIFF_LINES) -> Text:
     out = Text()
     lines = diff.splitlines()
+    pal = get_palette(ACTIVE_THEME)
+    add_style = f"{pal.diff_add_bg} {pal.diff_add_fg}".strip() if pal.diff_add_bg else "green"
+    del_style = f"{pal.diff_del_bg} {pal.diff_del_fg}".strip() if pal.diff_del_bg else "red"
     for line in lines[:max_lines]:
         if line.startswith(("+++", "---")):
             style = "bold"
         elif line.startswith("+"):
-            style = "green"
+            style = add_style
         elif line.startswith("-"):
-            style = "red"
+            style = del_style
         elif line.startswith("@@"):
-            style = "cyan"
+            style = pal.accent or "cyan"
         else:
             style = "dim"
         out.append(line + "\n", style=style)
@@ -199,8 +217,10 @@ def activity_label(tool: Tool, args: Dict[str, Any]) -> str:
     short = target if len(target) <= 48 else target[:45] + "..."
     return {
         "read_file": f"Reading {short}", "write_file": f"Writing {short}", "edit_file": f"Editing {short}",
+        "apply_patch": f"Patching {short}",
         "shell": f"Running {short}", "grep": f"Searching for {short}", "glob": f"Finding {short}",
-        "list_dir": f"Looking around {short}", "todo_write": "Updating the plan", "task": f"Researching {short}",
+        "list_dir": f"Looking around {short}", "symbols": f"Searching symbols for {short}",
+        "todo_write": "Updating the plan", "task": f"Researching {short}",
         "web_search": f"Searching the web for {short}", "web_fetch": f"Fetching {short}",
     }.get(tool.name, f"Running {tool.name}")
 
@@ -217,6 +237,10 @@ def summarize_output(tool: Tool, output: str, is_error: bool) -> Tuple[str, List
         if output.startswith("No "):
             return output.splitlines()[0], []
         return f"{len(lines)} result{'s' if len(lines) != 1 else ''}", lines[:3]
+    if tool.name == "symbols":
+        return lines[0][:200] if lines else "symbols found", lines[1:4]
+    if tool.name == "apply_patch":
+        return lines[0][:200] if lines else "patch applied", []
     if tool.name == "shell":
         exit_line = lines[-1] if lines else ""
         body = lines[:-1]

@@ -1,6 +1,22 @@
 # Changelog
 
-## Unreleased
+## 4.3.0
+
+- **Antigravity-Compatible Subagent Architecture (`invoke_subagent`, `define_subagent`):**
+  - Added `invoke_subagent` tool for parallel execution, customizable token budgets, and granular workspace isolation (`inherit`, `branch`, `share`, `worktree`).
+  - Added 4 pre-configured out-of-the-box specialists with zero configuration required:
+    - `research`: Fast, read-only specialist for broad codebase exploration, symbol lookups, and web search.
+    - `self`: Clones parent capabilities to tackle complex, multi-file implementation tasks in a clean context.
+    - `code-reviewer`: Deep audit specialist for security vulnerabilities, diff inspection, and code quality.
+    - `test-writer`: Automated unit and integration test creation and test-suite verification.
+  - Added `define_subagent` tool enabling the AI or user to dynamically specify, configure, and persist new specialist subagents (`project` or `user` scope) on the fly.
+- **Developer Lens & Design Language Engine (`LENS.md`, `/lens`):**
+  - First-class support for `LENS.md` (project scope) and `~/.hubble/LENS.md` (user global scope), fitting Hubble's optics and telescope identity. Also seamlessly discovers `STYLE.md` and `style.md`.
+  - Automatically loads and injects developer coding style, UI design language, color/token systems, and anti-pattern constraints into the model's system prompt with top priority, preventing generic statistical boilerplate ("LLM slop").
+  - New interactive `/lens` command (`/lens`, `/lens init`, `/lens add <rule>`, with `/style` as alias) for inspecting and configuring lens preferences directly in the REPL.
+- **Subagent Policy & Triggering Controls (`subagent_policy`):** Toggle subagent behavior via `subagent_policy` (`"auto" | "explicit" | "off"`) in `settings.json`, `--subagent-policy`, or the interactive `/subagent` command. In `explicit` mode, both `task` and `invoke_subagent` are gated and only provided to the active tool list if "agent", "subagent", or "delegate" is present in the prompt, preventing unintended subagent spawns on simple tasks. `off` disables subagent delegation entirely.
+- **Unified Diff Patch Engine (`apply_patch`):** Native unified diff patch tool supporting standard hunk syntax (`@@ -start,len +start,len @@`), ±100 line fuzzy offset scanning, whitespace tolerance, CRLF/LF preservation, and snapshotting for `/undo`.
+- **AST & Code Graph Symbol Indexer (`symbols`):** Fast zero-dependency AST and regex symbol indexer for Python, TypeScript/JavaScript, Go, and Rust. Features disk-cached `mtime` tracking for near-instant (<15ms) symbol lookups, single-file symbol outlines, and condensed repo mapping.
 
 - **`/stats` and `hubble --stats`:** per model, the share of your prompts it finished, call failures by
   status, speed, time to first token, tokens and estimated cost, from a local log

@@ -18,7 +18,20 @@ import httpx
 from hubble.tools import Tool, ToolContext, ToolError
 
 USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-              "Chrome/124.0 Safari/537.36 Hubble-CLI")
+              "Chrome/128.0.0.0 Safari/537.36 (Hubble/4.3; +https://github.com/hubble-cli/hubble)")
+BROWSER_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Sec-Ch-Ua": '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+}
 TIMEOUT = httpx.Timeout(connect=10.0, read=25.0, write=10.0, pool=10.0)
 MAX_DOWNLOAD = 3_000_000
 MAX_RESULTS = 10
@@ -30,39 +43,79 @@ def _strip_tags(s: str) -> str:
     return html.unescape(re.sub(r"<[^>]+>", "", s)).strip()
 
 
-def search_duckduckgo(query: str, limit: int) -> List[Dict[str, str]]:
-    resp = httpx.post("https://html.duckduckgo.com/html/", data={"q": query},
-                      headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT, follow_redirects=True)
-    if resp.status_code in (202, 429):
-        raise ToolError(
-            f"DuckDuckGo rate-limited the search (HTTP {resp.status_code}). "
-            "To enable reliable search, set BRAVE_API_KEY or TAVILY_API_KEY in .env, "
-            "or fetch documentation directly using web_fetch."
-        )
-    if resp.status_code != 200:
-        raise ToolError(f"DuckDuckGo returned HTTP {resp.status_code}")
+def _search_duckduckgo_lite(query: str, limit: int) -> List[Dict[str, str]]:
+    try:
+        resp = httpx.post("https://lite.duckduckgo.com/lite/", data={"q": query},
+                          headers={"User-Agent": USER_AGENT, "Accept": "text/html"},
+                          timeout=TIMEOUT, follow_redirects=True)
+    except httpx.HTTPError:
+        return []
+    if resp.status_code != 200 or "anomaly" in resp.text.lower():
+        return []
     page = resp.text
-    if "anomaly" in page.lower() and "result__a" not in page:
-        raise ToolError("DuckDuckGo asked for a captcha; set a Brave or Tavily API key for reliable search")
+    links = re.findall(r'<a\s+[^>]*href=[\'"]([^\'"]+)[\'"][^>]*class=[\'"]result-link[\'"][^>]*>(.*?)</a>', page, re.S)
+    if not links:
+        links = re.findall(r'<a\s+[^>]*class=[\'"]result-link[\'"][^>]*href=[\'"]([^\'"]+)[\'"][^>]*>(.*?)</a>', page, re.S)
+    snippets = re.findall(r'<td[^>]+class=[\'"]result-snippet[\'"][^>]*>(.*?)</td>', page, re.S)
+
     results = []
-    blocks = re.split(r'<div[^>]+class="[^"]*result(?:s_links)?[^"]*"', page)
-    for block in blocks:
-        link = re.search(r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', block, re.S)
-        if not link:
-            continue
-        href = html.unescape(link.group(1))
-        if "duckduckgo.com/l/" in href:  # redirect wrapper: real URL is in uddg=
+    for i, (href_raw, title_raw) in enumerate(links):
+        href = html.unescape(href_raw)
+        if "duckduckgo.com/l/" in href:
             href = unquote(parse_qs(urlparse(href).query).get("uddg", [href])[0])
         if href.startswith("//"):
             href = "https:" + href
-        if "duckduckgo.com/y.js" in href:  # ads
+        if "duckduckgo.com/y.js" in href:
             continue
-        snippet = re.search(r'class="result__snippet"[^>]*>(.*?)</a>', block, re.S)
-        results.append({"title": _strip_tags(link.group(2)), "url": href,
-                        "snippet": _strip_tags(snippet.group(1)) if snippet else ""})
+        snippet = _strip_tags(snippets[i]) if i < len(snippets) else ""
+        results.append({"title": _strip_tags(title_raw), "url": href, "snippet": snippet})
         if len(results) >= limit:
             break
     return results
+
+
+def search_duckduckgo(query: str, limit: int) -> List[Dict[str, str]]:
+    resp = None
+    try:
+        resp = httpx.post("https://html.duckduckgo.com/html/", data={"q": query},
+                          headers={"User-Agent": USER_AGENT, "Accept": "text/html"},
+                          timeout=TIMEOUT, follow_redirects=True)
+    except httpx.HTTPError:
+        pass
+
+    if resp is not None and resp.status_code == 200 and "anomaly" not in resp.text.lower():
+        page = resp.text
+        results = []
+        blocks = re.split(r'<div[^>]+class="[^"]*result(?:s_links)?[^"]*"', page)
+        for block in blocks:
+            link = re.search(r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', block, re.S)
+            if not link:
+                continue
+            href = html.unescape(link.group(1))
+            if "duckduckgo.com/l/" in href:  # redirect wrapper: real URL is in uddg=
+                href = unquote(parse_qs(urlparse(href).query).get("uddg", [href])[0])
+            if href.startswith("//"):
+                href = "https:" + href
+            if "duckduckgo.com/y.js" in href:  # ads
+                continue
+            snippet = re.search(r'class="result__snippet"[^>]*>(.*?)</a>', block, re.S)
+            results.append({"title": _strip_tags(link.group(2)), "url": href,
+                            "snippet": _strip_tags(snippet.group(1)) if snippet else ""})
+            if len(results) >= limit:
+                break
+        if results:
+            return results
+
+    # Automatic fallback to Lite endpoint when html.duckduckgo.com rate-limits or throws CAPTCHA
+    lite_results = _search_duckduckgo_lite(query, limit)
+    if lite_results:
+        return lite_results
+
+    status_str = f" (HTTP {resp.status_code})" if resp is not None else ""
+    raise ToolError(
+        f"Web search is temporarily unavailable{status_str}. "
+        "Fetch the documentation URL directly using web_fetch, or try rephrasing the query."
+    )
 
 
 def search_brave(query: str, limit: int, key: str) -> List[Dict[str, str]]:
@@ -84,8 +137,54 @@ def search_tavily(query: str, limit: int, key: str) -> List[Dict[str, str]]:
             for i in (resp.json().get("results") or [])[:limit]]
 
 
+def search_gateway(query: str, limit: int, search_url: str,
+                   api_key: Optional[str] = None) -> Optional[List[Dict[str, str]]]:
+    """Query a dedicated gateway/server search proxy (Cursor/Windsurf model).
+    Allows maintainers to host a search proxy using their master search key,
+    so end users do not need their own search credentials.
+    """
+    url = search_url.strip()
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    payload = {"query": query, "max_results": limit}
+
+    try:
+        resp = httpx.post(url, json=payload, headers=headers, timeout=TIMEOUT)
+        if resp.status_code == 200:
+            data = resp.json()
+            items = data.get("results") if isinstance(data, dict) else data
+            if isinstance(items, list) and items:
+                results = []
+                for i in items[:limit]:
+                    if not isinstance(i, dict):
+                        continue
+                    title = i.get("title", "")
+                    url_str = i.get("url", "")
+                    content = i.get("content") or i.get("snippet") or ""
+                    results.append({"title": title, "url": url_str, "snippet": _strip_tags(content)[:300]})
+                if results:
+                    return results
+    except httpx.HTTPError:
+        pass
+    return None
+
+
+DEFAULT_SEARCH_PROXY = "https://hubble-search.hamdayrabby385.workers.dev/v1/search"
+
+
 def web_search(query: str, limit: int = 8, config: Optional[Dict[str, Any]] = None) -> List[Dict[str, str]]:
     cfg = config or {}
+    search_url = cfg.get("search_url") or os.environ.get("HUBBLE_SEARCH_URL") or DEFAULT_SEARCH_PROXY
+    api_key = cfg.get("api_key") or os.environ.get("HUBBLE_API_KEY")
+
+    # 1. Dedicated Search Proxy (Method 2: Cloudflare Worker / custom search proxy)
+    if search_url and search_url.lower() != "off":
+        gateway_results = search_gateway(query, limit, search_url=search_url, api_key=api_key)
+        if gateway_results:
+            return gateway_results
+
+    # 2. Local provider keys (if explicitly configured)
     brave = cfg.get("brave_api_key") or os.environ.get("BRAVE_API_KEY")
     tavily = cfg.get("tavily_api_key") or os.environ.get("TAVILY_API_KEY")
     engine = (cfg.get("engine") or "auto").lower()
@@ -93,6 +192,8 @@ def web_search(query: str, limit: int = 8, config: Optional[Dict[str, Any]] = No
         return search_brave(query, limit, brave)
     if engine in ("tavily", "auto") and tavily:
         return search_tavily(query, limit, tavily)
+
+    # 3. Built-in zero-config keyless fallback (DuckDuckGo + Lite)
     try:
         return search_duckduckgo(query, limit)
     except httpx.HTTPError as e:
@@ -192,7 +293,7 @@ def fetch_url(url: str, max_chars: int = 30000, offset: int = 0) -> str:
         url = "https://" + url
     _check_public(url)
     try:
-        with httpx.Client(timeout=TIMEOUT, follow_redirects=False, headers={"User-Agent": USER_AGENT}) as client:
+        with httpx.Client(timeout=TIMEOUT, follow_redirects=False, headers=BROWSER_HEADERS) as client:
             for _ in range(5):  # follow redirects manually so every hop is checked
                 with client.stream("GET", url) as resp:
                     if resp.is_redirect and resp.headers.get("location"):
@@ -200,6 +301,10 @@ def fetch_url(url: str, max_chars: int = 30000, offset: int = 0) -> str:
                         _check_public(url)
                         continue
                     if resp.status_code >= 400:
+                        if resp.status_code == 403:
+                            server = resp.headers.get("server", "").lower()
+                            if "cloudflare" in server or "cf-mitigated" in resp.headers:
+                                raise ToolError(f"HTTP 403 for {url} (blocked by Cloudflare bot protection/challenge; direct automated fetch is restricted by site owner)")
                         raise ToolError(f"HTTP {resp.status_code} for {url}")
                     ctype = resp.headers.get("content-type", "")
                     body = b""

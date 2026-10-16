@@ -35,6 +35,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-m", "--model", help="model id")
     p.add_argument("--provider", help="provider name from /provider (default: last used)")
     p.add_argument("--permission-mode", choices=MODES, help="default | accept-edits | plan | yolo")
+    p.add_argument("--subagent-policy", choices=["auto", "explicit", "off"],
+                   help="subagent triggering policy: auto | explicit | off")
     p.add_argument("--yolo", action="store_true", help="shortcut for --permission-mode yolo (no approvals)")
     p.add_argument("--persona", choices=list(PERSONAS), help="system persona")
     p.add_argument("--output-format", choices=["text", "json", "stream-json"], default="text",
@@ -56,6 +58,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-session", action="store_true", help="do not save this session")
     p.add_argument("--quiet", action="store_true", help="with -p: hide tool progress on stderr")
     p.add_argument("--test", metavar="MODEL", help="check that a model responds, then exit")
+    p.add_argument("--theme", nargs="?", const="interactive", metavar="NAME",
+                   help="choose color scheme interactively or set by name (terminal, light, tokyo night, etc.)")
     p.add_argument("--stats", nargs="?", const=30.0, type=float, metavar="DAYS",
                    help="show which models finished your tasks, how fast and at what cost (default: 30 days)")
     p.add_argument("--add-to-path", action="store_true",
@@ -72,6 +76,26 @@ def main(argv=None):
             except (AttributeError, ValueError):
                 pass
     args = build_parser().parse_args(argv)
+    if args.theme is not None:
+        from hubble.theme import COLOR_SCHEMES, ORDERED_SCHEMES, choose_color_scheme
+        from hubble.settings import save_user_setting
+        chosen = None
+        if args.theme != "interactive":
+            target = args.theme.strip().lower()
+            if target in COLOR_SCHEMES:
+                chosen = target
+            else:
+                matches = [s for s in ORDERED_SCHEMES if target in s]
+                if len(matches) == 1:
+                    chosen = matches[0]
+                else:
+                    sys.exit(f"hubble: unknown color scheme '{args.theme}'. Available: {', '.join(ORDERED_SCHEMES)}")
+        else:
+            chosen = choose_color_scheme()
+        if chosen:
+            save_user_setting("theme", chosen)
+            print(f"✔ Switched color scheme to {chosen}")
+        sys.exit(0)
     if args.add_to_path:
         from hubble.setup_path import add_to_path
         sys.exit(add_to_path())
@@ -109,6 +133,7 @@ def main(argv=None):
         "model": args.model, "base_url": args.base_url, "api_key": args.api_key,
         "persona": args.persona, "max_turns": args.max_turns,
         "permission_mode": "yolo" if args.yolo else args.permission_mode,
+        "subagent_policy": args.subagent_policy,
     }
     interactive = not args.print_mode and sys.stdin.isatty()
     try:
@@ -175,6 +200,9 @@ def main(argv=None):
         piped = sys.stdin.read()
         if piped.strip():
             prompt = f"{prompt}\n\n<stdin>\n{piped}\n</stdin>" if prompt else piped
+
+    from hubble.ui import apply_theme
+    apply_theme(settings.get("theme", "terminal"))
 
     if args.print_mode:
         args._providers = providers

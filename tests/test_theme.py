@@ -1,0 +1,69 @@
+import pytest
+from hubble.theme import (
+    COLOR_SCHEMES,
+    ORDERED_SCHEMES,
+    get_palette,
+    get_rich_theme,
+    render_preview_lines,
+)
+from hubble.ui import ACTIVE_THEME, apply_theme, render_diff
+
+
+def test_theme_registry():
+    expected = [
+        "terminal",
+        "light",
+        "solarized light",
+        "colorblind-friendly light",
+        "dark",
+        "solarized dark",
+        "colorblind-friendly dark",
+        "tokyo night",
+    ]
+    assert ORDERED_SCHEMES == expected
+    for name in expected:
+        assert name in COLOR_SCHEMES
+        p = COLOR_SCHEMES[name]
+        assert p.name == name
+        assert p.user_prefix
+        assert p.diff_add_fg or p.diff_add_bg
+        assert p.diff_del_fg or p.diff_del_bg
+
+
+def test_get_palette_fallback():
+    assert get_palette("tokyo night").name == "tokyo night"
+    assert get_palette("TOKYO NIGHT").name == "tokyo night"
+    assert get_palette("solarized dark").name == "solarized dark"
+    assert get_palette("nonexistent_theme").name == "terminal"
+    assert get_palette(None).name == "terminal"
+
+
+def test_get_rich_theme():
+    theme = get_rich_theme("dark")
+    assert "info" in theme.styles
+    assert "error" in theme.styles
+    assert "warning" in theme.styles
+
+
+def test_render_preview_lines():
+    for name in ORDERED_SCHEMES:
+        palette = get_palette(name)
+        lines = render_preview_lines(palette, width=54)
+        assert len(lines) > 15
+        text_content = "".join(part[1] for part in lines)
+        assert "add a greeting function" in text_content
+        assert "func greet(name string)" in text_content
+        assert "Thought Process" in text_content
+        assert "write_file main.go" in text_content
+
+
+def test_apply_theme_integration():
+    apply_theme("tokyo night")
+    from hubble.ui import ACTIVE_THEME as current
+    assert current == "tokyo night"
+
+    diff = "--- a/test.py\n+++ b/test.py\n@@ -1,1 +1,2 @@\n-old\n+new"
+    rendered = render_diff(diff)
+    assert rendered is not None
+    # Reset back to terminal
+    apply_theme("terminal")

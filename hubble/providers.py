@@ -248,7 +248,7 @@ def provider_models(name: str) -> List[Dict[str, Any]]:
 NO_TOOLS: set = set()
 # Models that are not chat/agent models at all, whatever a "hi" probe says.
 NON_CHAT = re.compile(r"(^|[/_-])(parse|embed|embedding|rerank|reranker|guard|safety|moderation|whisper|tts|"
-                      r"speech|asr|ocr|clip|retriever|reward)([/_.-]|$)", re.I)
+                      r"speech|asr|ocr|clip|retriever|reward|diffusion)([/_.-]|$)", re.I)
 
 
 def agent_capable(provider: str, entry: Dict[str, Any]) -> bool:

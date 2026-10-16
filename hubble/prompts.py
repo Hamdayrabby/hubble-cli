@@ -5,7 +5,7 @@ import platform
 import subprocess
 import time
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from hubble.settings import HOME_DIR
 
@@ -26,12 +26,13 @@ PERSONAS = {
 
 GUIDELINES = """\
 # How to work
-- Use the tools to inspect the workspace instead of guessing. Search with grep/glob, then read_file the relevant parts.
-- Always read_file a file before editing it. Prefer edit_file for targeted changes; use write_file for new files.
+- Use the tools to inspect the workspace instead of guessing. Locate definitions with symbols or search text with grep/glob, then read_file the relevant parts.
+- Always read_file a file before editing it. Prefer edit_file for targeted changes; use apply_patch with standard unified diffs for multi-hunk edits or patch diffs; use write_file for new files.
 - In edit_file, old_string must match the file exactly, without the "N | " line-number prefix from read_file.
 - Keep changes minimal and consistent with the surrounding code style. Do not add unrelated refactors.
 - After changing code, verify it: run the tests, a build, or at least a syntax check with the shell tool.
 - For tasks with three or more steps, track progress with todo_write.
+- Do NOT use the task tool for routine questions, single-file edits, targeted fixes, or basic exploration. Always inspect, search, and edit files directly with symbols, grep, glob, read_file, edit_file, or apply_patch. Only use task if the user explicitly asks for delegated assistance or a team, or when the task requires exploring an extensive, unfamiliar multi-module codebase across dozens of files. If in doubt, do the work directly yourself.
 - If you notice yourself repeating a multi-step procedure this user is likely to need again, offer to
   save it with write_skill so it is available as a skill next time (ask first; do not save one-off tasks).
 - Use web_search for anything that may have changed since your training (library versions, APIs, error
@@ -87,6 +88,72 @@ def workspace_overview(root: Path, limit: int = 80) -> str:
     return "\n".join(lines[: limit + 1]) or "  (empty)"
 
 
+LENS_FILENAMES = ("LENS.md", "lens.md", ".hubble/lens.md", "STYLE.md", "style.md", "taste.md", "TASTE.md")
+MAX_LENS_CHARS = 15000
+
+LENS_TEMPLATE = """# Developer Lens & Design Language
+
+## 🎨 UI & Design Language
+- Styling: Modern, clean, and cohesive design system.
+- Colors: Curated, harmonic color palettes (e.g. HSL tailored tokens, polished dark mode). Avoid generic primitive colors.
+- Typography: Clean hierarchy using modern typography (e.g. Inter, Outfit, Roboto).
+- Components: Accessible, responsive layout with subtle micro-interactions and smooth transitions.
+
+## 💻 Coding Style & Conventions
+- Pattern: Prefer concise, expressive code with early-return guard clauses.
+- Typing: Strict type safety; avoid loose `any` or ambiguous data structures.
+- Naming: Descriptive, consistent naming following ecosystem idioms (e.g. kebab-case files, camelCase variables).
+- Errors: Explicit error handling with meaningful context; never swallow exceptions silently.
+
+## 🏗️ Architecture & Boundaries
+- Structure: Modular, focused files with single responsibilities.
+- State: Unidirectional data flow and clear ownership.
+- Dependencies: Prefer lightweight, well-maintained libraries over monolithic bloat.
+
+## 🚫 Anti-Patterns (What NOT to do)
+- Do not output generic statistical boilerplate or unstyled placeholder UIs.
+- Do not make speculative refactors outside the requested scope.
+- Do not bypass type checkers or lint rules with blanket disable comments.
+"""
+
+TASTE_TEMPLATE = LENS_TEMPLATE
+
+
+def find_lens_files(root: Path) -> List[Path]:
+    """User-level lens (~/.hubble/LENS.md or ~/LENS.md), then workspace lens (LENS.md / .hubble/lens.md)."""
+    found = []
+    for p in (HOME_DIR / "LENS.md", HOME_DIR / "lens.md", HOME_DIR / ".hubble" / "lens.md",
+              HOME_DIR / "STYLE.md", HOME_DIR / "style.md", HOME_DIR / "taste.md"):
+        if p.is_file() and p not in found:
+            found.append(p)
+            break
+    for name in LENS_FILENAMES:
+        p = root / name
+        if p.is_file() and p not in found:
+            found.append(p)
+            break
+    return found
+
+
+find_taste_files = find_lens_files
+
+
+def load_lens(root: Path) -> List[Tuple[Path, str]]:
+    out, budget = [], MAX_LENS_CHARS
+    for p in find_lens_files(root):
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if text and budget > 0:
+            out.append((p, text[:budget]))
+            budget -= len(text)
+    return out
+
+
+load_taste = load_lens
+
+
 def find_memory_files(root: Path) -> List[Path]:
     """User-level memory, then files from the filesystem root down to the workspace."""
     found = [p for p in (HOME_DIR / "HUBBLE.md",) if p.is_file()]
@@ -117,7 +184,9 @@ def load_memory(root: Path) -> List[Tuple[Path, str]]:
 
 def build_system_prompt(root: Path, persona: str, shell: str, model: str,
                         pinned: dict, memory: List[Tuple[Path, str]], mode: str,
-                        skills_block: str = "") -> str:
+                        skills_block: str = "",
+                        lens: Optional[List[Tuple[Path, str]]] = None,
+                        taste: Optional[List[Tuple[Path, str]]] = None) -> str:
     parts = [PERSONAS.get(persona, PERSONAS["code"]), GUIDELINES]
     parts.append(
         "# Environment\n"
@@ -133,6 +202,16 @@ def build_system_prompt(root: Path, persona: str, shell: str, model: str,
     if mode == "plan":
         parts.append("# Plan mode\nYou are in read-only plan mode. Explore with read-only tools, then present "
                      "a concise step-by-step implementation plan. Do not try to edit files or run commands.")
+    effective_lens = lens or taste
+    if effective_lens:
+        for path, text in effective_lens:
+            parts.append(
+                f"# Developer Lens & Design Language from {path}\n"
+                "Observe and interpret the codebase through the developer's personal lens below. Strictly adhere to "
+                "their custom coding style, aesthetic design language, architectural conventions, and anti-patterns. "
+                "Do not revert to generic statistical boilerplate or defaults that conflict with these preferences:\n"
+                f"{text}"
+            )
     for path, text in memory:
         parts.append(f"# Project instructions from {path}\n{text}")
     if skills_block:
