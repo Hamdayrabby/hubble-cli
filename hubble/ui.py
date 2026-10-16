@@ -159,7 +159,7 @@ class StreamingMarkdown:
             from rich.live import Live
             from hubble.spinner import Footed
             self._last = time.time()
-            self.live = Live(Footed(_BlockPreview(self)), console=self.console, refresh_per_second=30,
+            self.live = Live(Footed(_BlockPreview(self)), console=self.console, refresh_per_second=15,
                              transient=True, vertical_overflow="crop")
             self.live.start()
 

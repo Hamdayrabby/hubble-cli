@@ -439,17 +439,18 @@ class Repl:
         # Leave room for the prompt line and the toolbar (3+ lines), plus the completion menu while typing / or @.
         toolbar = getattr(self, "_toolbar_height", 3)
         budget = size.rows - 2 - toolbar - (10 if typed[:1] in ("/", "@") or " @" in typed else 0)
-        # prompt_toolkit asks for the message several times per redraw (measure, then draw);
-        # build each frame once per 1/30 s tick and reuse it.
-        elapsed = time.time() - self._home_t0
-        key = (int(elapsed * 30), size.columns, budget)
         cached = getattr(self, "_home_frame", None)
-        if cached and cached[0] == key:
+        # When user is typing, freeze animation frame to eliminate input latency and prevent keystroke lag.
+        if typed.strip() and cached is not None and cached[2] == budget and cached[3] == size.columns:
+            return cached[1]
+        elapsed = time.time() - self._home_t0
+        fps_step = int(elapsed * 15)
+        if cached and cached[0] == fps_step and cached[2] == budget and cached[3] == size.columns:
             return cached[1]
         status, tips = self._home
         frags = compose_home_fragments(size.columns, max(budget, 3), elapsed, status, tips, __version__)
         frame = FormattedText(frags + [("bold fg:ansicyan", "❯"), ("", " ")])
-        self._home_frame = (key, frame)
+        self._home_frame = (fps_step, frame, budget, size.columns)
         return frame
 
     def fallback_for(self, provider: str, model: str):
@@ -561,7 +562,7 @@ class Repl:
                 if self._home is not None:
                     # Animated home screen lives in the prompt until the first message is sent;
                     # the last frame stays in the scrollback.
-                    text = session.prompt(self._home_message, refresh_interval=1 / 30, reserve_space_for_menu=0)
+                    text = session.prompt(self._home_message, refresh_interval=1 / 15, reserve_space_for_menu=0)
                     self._home = None
                     # PromptSession.prompt() kwargs overwrite the session permanently, not just for
                     # that one call -- without resetting these, every later prompt keeps 0 reserved

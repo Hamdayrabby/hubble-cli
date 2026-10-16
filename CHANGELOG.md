@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.3.2
+
+- **Compact Modern Block Logo:**
+  - Scaled down the main ASCII banner logo from 6 rows to 3 rows of sleek, balanced block letters.
+  - Reduced vertical footprint by 50%, preserving screen real estate on smaller terminal windows and panels while keeping visual punch and gradient shimmer.
+- **Buttery-Smooth Animation & Zero Typing Lag:**
+  - Optimized the background starfield animation rate to 15 fps (~66ms per frame) to prevent terminal I/O buffer saturation and eliminated dropped frames on Windows Terminal and PowerShell.
+  - Added fast-path hex color conversion in `_pt_style` to eliminate expensive regex-based `Style.parse` calls during animation frames.
+  - Implemented typing-aware animation freezing: the instant the user presses a key, the background animation tick freezes and reuses the cached frame, delivering 0ms input latency and butter-smooth typing responsiveness.
+  - Reduced `StreamingMarkdown` live refresh frequency to 15 fps, removing stutter while streaming model responses.
+
 ## 4.3.1
 
 - **Sleek Dark Autocompletion Menu:**

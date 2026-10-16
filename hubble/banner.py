@@ -9,20 +9,20 @@ from rich.text import Text
 
 NAME = "Hubble"
 
-# "ANSI Shadow" style letters, 6 rows each.
+# Compact block-letter logo, 3 rows each.
 _LETTERS = {
-    "H": ["██╗  ██╗", "██║  ██║", "███████║", "██╔══██║", "██║  ██║", "╚═╝  ╚═╝"],
-    "U": ["██╗   ██╗", "██║   ██║", "██║   ██║", "██║   ██║", "╚██████╔╝", " ╚═════╝ "],
-    "B": ["██████╗ ", "██╔══██╗", "██████╔╝", "██╔══██╗", "██████╔╝", "╚═════╝ "],
-    "L": ["██╗     ", "██║     ", "██║     ", "██║     ", "███████╗", "╚══════╝"],
-    "E": ["███████╗", "██╔════╝", "█████╗  ", "██╔══╝  ", "███████╗", "╚══════╝"],
+    "H": ["██╗  ██╗", "███████║", "██║  ██║"],
+    "U": ["██╗  ██╗", "██║  ██║", "╚██████╝"],
+    "B": ["██████╗ ", "██╔══██╗", "██████╔╝"],
+    "L": ["██╗     ", "██║     ", "███████╗"],
+    "E": ["███████╗", "█████╗  ", "███████╗"],
 }
 
 GRADIENT = [(0, 215, 255), (95, 135, 255), (175, 95, 255), (255, 95, 215)]  # cyan -> violet -> pink
 
 
 def _logo_rows(word: str = NAME.upper()) -> List[str]:
-    return ["".join(_LETTERS[ch][row] for ch in word) for row in range(6)]
+    return ["".join(_LETTERS[ch][row] for ch in word) for row in range(len(_LETTERS["H"]))]
 
 
 # Large logo: 5x7 pixel letters, each pixel two cells wide (terminal cells are about twice as
@@ -541,6 +541,29 @@ def _pt_style(style: Any) -> str:
     cached = _PT_STYLES.get(key)
     if cached is not None:
         return cached
+
+    # Fast-path common hex styles used in animations without calling Style.parse()
+    if isinstance(style, str):
+        if style.startswith("#") and len(style) == 7:
+            out = f"fg:{style}"
+            _PT_STYLES[key] = out
+            return out
+        if style.startswith("bold #") and len(style) == 12:
+            out = f"bold fg:{style[5:]}"
+            _PT_STYLES[key] = out
+            return out
+        if style.endswith(" dim") and style.startswith("#") and len(style) == 11:
+            hex_part = style[:7]
+            try:
+                r = int(hex_part[1:3], 16)
+                g = int(hex_part[3:5], 16)
+                b = int(hex_part[5:7], 16)
+                out = f"fg:#{int(r * 0.55):02x}{int(g * 0.55):02x}{int(b * 0.55):02x}"
+                _PT_STYLES[key] = out
+                return out
+            except ValueError:
+                pass
+
     from rich.style import Style
     try:
         st = style if isinstance(style, Style) else Style.parse(style)
@@ -562,6 +585,8 @@ def _pt_style(style: Any) -> str:
     if st.strike:
         parts.append("strike")
     out = " ".join(parts)
+    if len(_PT_STYLES) > 1024:
+        _PT_STYLES.clear()
     _PT_STYLES[key] = out
     return out
 
@@ -593,7 +618,7 @@ def compose_grid(width: int, height: int, t: float, status: List[Text], tips: Li
     height = max(height, 1)
     # Logo sizes: 1 = block letters, 0 = one-line wordmark. (2, the large pixel letters, is kept
     # for anyone who wants it back, but the HUBBLE starship is the star of the screen now.)
-    logo_h = {2: 9, 1: 7, 0: 1}  # letter rows + shadow row + tagline
+    logo_h = {2: 9, 1: 4, 0: 1}  # letter rows + tagline
     top = 1 if width >= 58 else 0
     # Richest to poorest: the starship scene comes first, then the bigger logo, then tips,
     # then status lines.
