@@ -106,7 +106,7 @@ def test_run_footer_shows_live_usage(tmp_path):
     agent = Agent(None, {"model": "nemotron-ultra", "provider": "nvidia", "max_turns": 3, "max_tokens": 10,
                          "context_window": 1000, "auto_compact_ratio": 0, "persona": "code"},
                   ctx, Permissions(), ReplEvents(ctx))
-    repl = Repl(agent, SessionStore(tmp_path), {"nvidia": object(), "aihub": object()})
+    repl = Repl(agent, SessionStore(tmp_path), {"nvidia": object(), "hubble": object()})
     agent.last_stats = RunStats(prompt_tokens=534_300, completion_tokens=1_200, tool_calls=34)
     agent.total_prompt_tokens, agent.total_completion_tokens = 1_200_000, 5_000
     line = repl._run_footer().plain

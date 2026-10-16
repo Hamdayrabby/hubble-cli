@@ -57,7 +57,7 @@ It connects natively to Claude via Anthropic's Messages API (with prompt caching
 
 - **Repository-Native Agent Loop**: Reads, searches, and edits source trees with AST-aware line replacements, disk-freshness checks, and automated checkpoint snapshots for one-command rollback (`/undo`).
 - **Defense-in-Depth Sandboxing**: OS-level command sandboxing via macOS Seatbelt (`sandbox-exec`), Linux `bubblewrap`, or ephemeral Docker containers with configurable CPU, memory, and network isolation.
-- **Provider Agnostic**: Native integration with Anthropic Claude Messages API (prompt caching, thinking mode, native tool calling), any OpenAI-compatible API (AIHub, OpenAI, Groq, OpenRouter, Mistral, DeepSeek), and local LLMs (Ollama, LM Studio).
+- **Provider Agnostic**: Native integration with Anthropic Claude Messages API (prompt caching, thinking mode, native tool calling), any OpenAI-compatible API (Hubble Gateway, OpenAI, Groq, OpenRouter, Mistral, DeepSeek), and local LLMs (Ollama, LM Studio).
 - **Intelligent Dynamic Routing**: Directs queries, lookups, and research subtasks to fast, low-cost models, escalating complex edits or failed operations to high-reasoning models automatically.
 - **Subagent Delegation & Teams**: Dispatches focused research or implementation sub-agents in parallel across specialized models.
 - **Git Worktree Isolation**: Spawns isolated scratch environments in `.hubble/worktrees/` on dedicated branches to keep worktree experiments completely detached from the primary branch.
@@ -362,7 +362,7 @@ Once saved, the specialist is immediately available across all subagent tools an
 Assign specific models to distinct sub-agent roles:
 
 ```bash
-/team add aihub:ministral-8b-latest fast, for broad code search and discovery
+/team add hubble:ministral-8b-latest fast, for broad code search and discovery
 /team add groq:llama-3.3-70b-versatile quick second opinions and diff reviews
 /team add anthropic:claude-opus-5 careful, for deep architectural refactoring
 ```
@@ -565,7 +565,7 @@ This generates `.github/workflows/hubble.yml`. Once configured with a `HUBBLE_AP
 Optimize latency and inference expenses using `/route`:
 
 ```bash
-/route fast aihub:ministral-8b-latest    # Small, rapid model for lookups and search
+/route fast hubble:ministral-8b-latest    # Small, rapid model for lookups and search
 /route strong anthropic:claude-opus-5    # High-reasoning model for complex refactors
 /route auto                              # Automatically selects optimal fast model via /stats
 ```

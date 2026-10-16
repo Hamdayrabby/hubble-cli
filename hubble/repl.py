@@ -1145,7 +1145,7 @@ class Repl:
             spec = parts[1].strip()
             prov, model = parse_spec(spec, self.agent.provider_name)
             if prov not in self.providers:
-                console.print(f"[red]Unknown provider '{escape(prov)}'. Use provider:model, e.g. aihub:codestral-latest[/red]")
+                console.print(f"[red]Unknown provider '{escape(prov)}'. Use provider:model, e.g. hubble:codestral-latest[/red]")
                 return
             cfg[sub] = f"{prov}:{model}"
             cfg.setdefault("strong" if sub == "fast" else "fast", cur)
@@ -1198,7 +1198,7 @@ class Repl:
         if sub == "add" and len(parts) >= 2:
             prov, model = parse_spec(parts[1], self.agent.provider_name)
             if prov not in self.providers:
-                console.print(f"[red]Unknown provider '{escape(prov)}'. Use provider:model, e.g. aihub:codestral-latest[/red]")
+                console.print(f"[red]Unknown provider '{escape(prov)}'. Use provider:model, e.g. hubble:codestral-latest[/red]")
                 return
             spec = f"{prov}:{model}"
             team = [e for e in team if e["model"] != spec] + [{"model": spec, "use": parts[2] if len(parts) > 2 else ""}]
@@ -1224,7 +1224,7 @@ class Repl:
         if not team:
             console.print("[dim]No sub-agent team yet: sub-agents use your current model (or the fast routing tier "
                           "for research). Add models with, e.g.:\n"
-                          "  /team add aihub:ministral-8b-latest fast, for searching and reading lots of files\n"
+                          "  /team add hubble:ministral-8b-latest fast, for searching and reading lots of files\n"
                           "  /team add anthropic:claude-opus-5 careful, for tricky changes and code review[/dim]")
             return
         from hubble.agent import team_block

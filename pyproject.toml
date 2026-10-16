@@ -42,7 +42,6 @@ dev = ["pytest>=7"]
 
 [project.scripts]
 hubble = "hubble.main:main"
-aihub = "hubble.main:main"  # old name, kept as an alias
 
 [tool.setuptools]
 packages = ["hubble"]

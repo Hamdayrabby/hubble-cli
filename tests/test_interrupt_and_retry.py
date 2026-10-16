@@ -138,21 +138,21 @@ class Prov:
         return self.parent.pop(0)
 
 
-TEAM = {"subagent_models": [{"model": "aihub:flaky-fast", "use": "fast, for searching"},
+TEAM = {"subagent_models": [{"model": "hubble:flaky-fast", "use": "fast, for searching"},
                             {"model": "groq:steady", "use": "careful reviewer"}]}
 
 
 def test_failed_subagent_retries_on_next_team_model(tmp_path):
     log = []
-    aihub = Prov("aihub", log, parent=[
+    hub = Prov("hubble", log, parent=[
         TurnResult(tool_calls=[ToolCall("t1", "task", json.dumps({"description": "look", "prompt": "find"}))]),
         TurnResult(text="done")], fail_models={"flaky-fast"})
-    provs = {"aihub": aihub, "groq": Prov("groq", log)}
-    agent = Agent(aihub, {**BASE, "provider": "aihub", **TEAM}, ToolContext(root=tmp_path), Permissions(), Events())
+    provs = {"hubble": hub, "groq": Prov("groq", log)}
+    agent = Agent(hub, {**BASE, "provider": "hubble", **TEAM}, ToolContext(root=tmp_path), Permissions(), Events())
     agent.client_for = provs.get
     agent.run("research something")
     subs = [(p, m) for p, m, kind in log if kind == "sub"]
-    assert subs == [("aihub", "flaky-fast"), ("groq", "steady")]   # auto-picked fast one, then retried
+    assert subs == [("hubble", "flaky-fast"), ("groq", "steady")]   # auto-picked fast one, then retried
     report = next(m["content"] for m in agent.messages if m.get("role") == "tool")
     assert "report from steady" in report and "after the first model failed" in report
 
@@ -170,26 +170,26 @@ def test_edit_subagent_is_not_retried_after_it_acted(tmp_path):
                 raise ProviderError("HTTP 404: gone", 404)
             return TurnResult(tool_calls=[ToolCall("w", "write_file", json.dumps({"path": "a.txt", "content": "x"}))])
 
-    aihub = ActsThenFails("aihub", log, parent=[
+    hub = ActsThenFails("hubble", log, parent=[
         TurnResult(tool_calls=[ToolCall("t1", "task", json.dumps({"description": "change", "prompt": "edit",
                                                                     "capability": "edit"}))]),
         TurnResult(text="done")])
     team = {"subagent_models": [{"model": "groq:steady", "use": "fast searcher"}]}  # nothing edit-suited
-    agent = Agent(aihub, {**BASE, "provider": "aihub", **team}, ToolContext(root=tmp_path),
+    agent = Agent(hub, {**BASE, "provider": "hubble", **team}, ToolContext(root=tmp_path),
                   Permissions("accept-edits"), Events())
-    agent.client_for = {"aihub": aihub, "groq": Prov("groq", log)}.get
+    agent.client_for = {"hubble": hub, "groq": Prov("groq", log)}.get
     agent.run("make a change")
-    assert ("aihub", "m", "sub") in log                          # the edit ran on the main model
+    assert ("hubble", "m", "sub") in log                          # the edit ran on the main model
     assert not any(p == "groq" for p, m, k in log)               # never re-run a half-done edit elsewhere
     tool_out = next(m["content"] for m in agent.messages if m.get("role") == "tool")
     assert "after making changes" in tool_out
 
 
 def test_pick_team_model_by_job():
-    assert pick_team_model(TEAM, edit=False) == "aihub:flaky-fast"
+    assert pick_team_model(TEAM, edit=False) == "hubble:flaky-fast"
     assert pick_team_model(TEAM, edit=True) == "groq:steady"
-    plain = {"subagent_models": [{"model": "aihub:a", "use": ""}]}
-    assert pick_team_model(plain, edit=False) == "aihub:a"
+    plain = {"subagent_models": [{"model": "hubble:a", "use": ""}]}
+    assert pick_team_model(plain, edit=False) == "hubble:a"
     assert pick_team_model(plain, edit=True) == ""               # edits stay on the main model
     assert pick_team_model({}, edit=False) == ""
 
@@ -207,7 +207,7 @@ def test_ctrl_c_twice_on_empty_prompt_exits(tmp_path):
 
     ctx = ToolContext(root=tmp_path)
     agent = Agent(None, dict(BASE), ctx, Permissions(), ReplEvents(ctx))
-    repl = Repl(agent, SessionStore(tmp_path), {"aihub": object()})
+    repl = Repl(agent, SessionStore(tmp_path), {"hubble": object()})
     repl._refresh_stale_scans = lambda: None
     repl.banner = lambda: None
     sent = []

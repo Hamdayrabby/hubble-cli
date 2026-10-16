@@ -1,6 +1,6 @@
 """Multiple OpenAI-compatible providers.
 
-The built-in "aihub" provider comes from settings/.env, and connects to the AIHub gateway (or
+The built-in "hubble" provider comes from settings/.env, and connects to the Hubble gateway (or
 another OpenAI-compatible base URL you set) by default. Extra providers added with
 `/provider add` live in ~/.hubble/providers.json; their API keys go to the OS credential store
 (see keystore.py), or into that file in plain text only where no store exists. Each provider
@@ -21,11 +21,10 @@ from hubble.models import SCAN_FILE, all_models
 from hubble.provider import normalize_base_url
 from hubble.settings import HOME_DIR
 
-# The built-in provider is the AIHub gateway (HUBBLE_API_KEY / HUBBLE_BASE_URL), so it is named
-# after it. Versions up to 4.1 called it "hubble"; saved settings, sessions and /fallback choices
-# that still say "hubble" map to it.
-DEFAULT_PROVIDER = "aihub"
-LEGACY_DEFAULT_PROVIDER = "hubble"
+# The built-in provider is the Hubble gateway (HUBBLE_API_KEY / HUBBLE_BASE_URL).
+# Saved settings, sessions and /fallback choices that still say "aihub" map to it.
+DEFAULT_PROVIDER = "hubble"
+LEGACY_DEFAULT_PROVIDER = "aihub"
 PROVIDERS_FILE = HOME_DIR / "providers.json"
 NAME_RX = re.compile(r"^[a-z0-9][a-z0-9_-]{0,30}$")
 
@@ -264,7 +263,7 @@ def resolve_fallback(settings: Dict[str, Any], providers: Dict[str, "ProviderCon
 
     Order: a fallback set for this provider (/fallback), then fallback_model if this provider
     has it, then the fastest verified model on the same provider, then fallback_model on the
-    built-in aihub provider. Returns None when fallback is off or nothing suitable exists.
+    built-in hubble provider. Returns None when fallback is off or nothing suitable exists.
     """
     per_map = settings.get("fallback_models") or {}
     per_provider = per_map.get(provider)

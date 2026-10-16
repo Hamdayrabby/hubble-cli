@@ -165,7 +165,7 @@ def test_grep_never_returns_secrets(ctx):
     (ctx.root / "k.pfx").write_text("TOKEN=abc\n", encoding="utf-8")
     out, err = run_tool(Grep(), {"pattern": "=", "path": ".env"}, ctx)
     assert err and "secrets" in out
-    out, err = run_tool(Grep(), {"pattern": "TOKEN|AIHUB"}, ctx)
+    out, err = run_tool(Grep(), {"pattern": "TOKEN|HUBBLE"}, ctx)
     assert "abc" not in out and "secret" not in out.split("(")[0]
 
 

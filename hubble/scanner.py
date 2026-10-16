@@ -205,7 +205,7 @@ class ModelScanner:
                 entries = data.get("data", data) if isinstance(data, dict) else data
                 owners = {m["id"]: m.get("owned_by", "") for m in entries if isinstance(m, dict) and m.get("id")}
                 # Some gateways (OpenRouter and a few others) publish each model's real context
-                # size; most (including the default AIHub gateway) do not, so this is best-effort.
+                # size; most (including the default Hubble gateway) do not, so this is best-effort.
                 context_lengths = {m["id"]: _context_length(m) for m in entries
                                    if isinstance(m, dict) and m.get("id")}
                 self.total = len(owners)

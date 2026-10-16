@@ -25,7 +25,7 @@ class Named:
         return r
 
 
-def make(tmp_path, providers, settings=None, main="aihub", model="big"):
+def make(tmp_path, providers, settings=None, main="hubble", model="big"):
     agent = Agent(providers[main], {**BASE, "model": model, "provider": main, **(settings or {})},
                   ToolContext(root=tmp_path), Permissions("accept-edits"), Events())
     agent.client_for = providers.get
@@ -46,8 +46,8 @@ def test_classify_questions_fast_changes_strong():
 
 
 def test_parse_spec_handles_slashes_and_providers():
-    assert parse_spec("nvidia/nemotron-3-super-120b-a12b", "aihub") == ("aihub", "nvidia/nemotron-3-super-120b-a12b")
-    assert parse_spec("nvidia:meta/llama-3.1-8b", "aihub") == ("nvidia", "meta/llama-3.1-8b")
+    assert parse_spec("nvidia/nemotron-3-super-120b-a12b", "hubble") == ("hubble", "nvidia/nemotron-3-super-120b-a12b")
+    assert parse_spec("nvidia:meta/llama-3.1-8b", "hubble") == ("nvidia", "meta/llama-3.1-8b")
     assert parse_spec("codestral-latest", "hcnsec") == ("hcnsec", "codestral-latest")
 
 
@@ -77,8 +77,8 @@ def test_struggle_signals():
 
 def test_prompt_routed_to_fast_then_model_restored(tmp_path):
     log = []
-    provs = {"aihub": Named("aihub", [TurnResult(text="It scans models.")], log)}
-    agent = make(tmp_path, provs, {"routing": {"fast": "aihub:small", "strong": "aihub:big"}})
+    provs = {"hubble": Named("hubble", [TurnResult(text="It scans models.")], log)}
+    agent = make(tmp_path, provs, {"routing": {"fast": "hubble:small", "strong": "hubble:big"}})
     assert agent.run("what does the scanner do?") == "It scans models."
     assert log[0][1] == "small"
     assert agent.model == "big"                      # restored after the task
@@ -87,18 +87,18 @@ def test_prompt_routed_to_fast_then_model_restored(tmp_path):
 
 def test_route_across_providers(tmp_path):
     log = []
-    provs = {"aihub": Named("aihub", [], log),
+    provs = {"hubble": Named("hubble", [], log),
              "groq": Named("groq", [TurnResult(text="done")], log)}
-    agent = make(tmp_path, provs, {"routing": {"fast": "groq:llama-fast", "strong": "aihub:big"}})
+    agent = make(tmp_path, provs, {"routing": {"fast": "groq:llama-fast", "strong": "hubble:big"}})
     agent.run("list the files")
     assert log == [("groq", "llama-fast", log[0][2])]
-    assert agent.provider is provs["aihub"] and agent.provider_name == "aihub"
+    assert agent.provider is provs["hubble"] and agent.provider_name == "hubble"
 
 
 def test_fast_model_empty_reply_escalates_to_strong(tmp_path):
     log = []
-    provs = {"aihub": Named("aihub", [TurnResult(text=""), TurnResult(text="real answer")], log)}
-    agent = make(tmp_path, provs, {"routing": {"fast": "aihub:small", "strong": "aihub:big"}})
+    provs = {"hubble": Named("hubble", [TurnResult(text=""), TurnResult(text="real answer")], log)}
+    agent = make(tmp_path, provs, {"routing": {"fast": "hubble:small", "strong": "hubble:big"}})
     assert agent.run("where is the config loaded?") == "real answer"
     assert [m for _, m, _ in log] == ["small", "big"]
     recs = stats.load()
@@ -109,28 +109,28 @@ def test_fast_model_empty_reply_escalates_to_strong(tmp_path):
 def test_repeated_bad_tool_calls_escalate(tmp_path):
     log = []
     bad = TurnResult(tool_calls=[ToolCall("c1", "read_file", json.dumps({}))])  # missing required path
-    provs = {"aihub": Named("aihub", [bad, TurnResult(tool_calls=[ToolCall("c2", "read_file", "{}")]),
+    provs = {"hubble": Named("hubble", [bad, TurnResult(tool_calls=[ToolCall("c2", "read_file", "{}")]),
                                       TurnResult(text="ok")], log)}
-    agent = make(tmp_path, provs, {"routing": {"fast": "aihub:small", "strong": "aihub:big"}})
+    agent = make(tmp_path, provs, {"routing": {"fast": "hubble:small", "strong": "hubble:big"}})
     agent.run("show me the readme")
     assert [m for _, m, _ in log] == ["small", "small", "big"]
 
 
 def test_research_subagent_uses_fast_tier(tmp_path):
     log = []
-    provs = {"aihub": Named("aihub", [
+    provs = {"hubble": Named("hubble", [
         TurnResult(tool_calls=[ToolCall("t1", "task", json.dumps({"description": "look", "prompt": "find x"}))]),
         TurnResult(text="report"),
         TurnResult(text="final"),
     ], log)}
-    agent = make(tmp_path, provs, {"routing": {"fast": "aihub:small", "strong": "aihub:big"}})
+    agent = make(tmp_path, provs, {"routing": {"fast": "hubble:small", "strong": "hubble:big"}})
     agent.run("refactor the scanner to use the cache")   # strong prompt
     assert [m for _, m, _ in log] == ["big", "small", "big"]  # parent strong, research sub-agent fast
 
 
 def test_no_routing_leaves_model_alone(tmp_path):
     log = []
-    provs = {"aihub": Named("aihub", [TurnResult(text="x")], log)}
+    provs = {"hubble": Named("hubble", [TurnResult(text="x")], log)}
     agent = make(tmp_path, provs)
     agent.run("what is this")
     assert log[0][1] == "big" and agent.last_route is None
@@ -140,7 +140,7 @@ def test_no_routing_leaves_model_alone(tmp_path):
 
 def test_calls_tasks_and_fallback_are_recorded(tmp_path):
     log = []
-    provs = {"aihub": Named("aihub", [ProviderError("HTTP 429: busy", 429)], log),
+    provs = {"hubble": Named("hubble", [ProviderError("HTTP 429: busy", 429)], log),
              "groq": Named("groq", [TurnResult(text="answer", usage={"prompt_tokens": 100, "completion_tokens": 20},
                                                duration=2.0)], log)}
     agent = make(tmp_path, provs)
@@ -158,13 +158,13 @@ def test_calls_tasks_and_fallback_are_recorded(tmp_path):
 def test_summary_success_rates_cost_and_fast_pick(tmp_path):
     log = stats.StatsLog()
     for _ in range(6):
-        log.call("aihub", "quick", True, prompt_tokens=1000, completion_tokens=500, duration=1.0)
-    log.call("aihub", "quick", False, status=503)
+        log.call("hubble", "quick", True, prompt_tokens=1000, completion_tokens=500, duration=1.0)
+    log.call("hubble", "quick", False, status=503)
     for _ in range(6):
         log.call("anthropic", "claude-opus-5", True, prompt_tokens=1_000_000, completion_tokens=100_000, duration=1000.0)
-    log.task("aihub", "quick", True)
-    log.task("aihub", "quick", False, reason="no answer")
-    log.task("aihub", "quick", True, subagent=True)  # sub-agent tasks don't count as your tasks
+    log.task("hubble", "quick", True)
+    log.task("hubble", "quick", False, reason="no answer")
+    log.task("hubble", "quick", True, subagent=True)  # sub-agent tasks don't count as your tasks
     rows = {r["model"]: r for r in stats.summarize(stats.load())}
     q = rows["quick"]
     assert q["calls"] == 7 and round(q["call_success"], 2) == 0.86 and q["tasks"] == 2 and q["task_success"] == 0.5
@@ -179,7 +179,7 @@ def test_summary_success_rates_cost_and_fast_pick(tmp_path):
 
 def test_stats_disabled(tmp_path):
     log = []
-    provs = {"aihub": Named("aihub", [TurnResult(text="x")], log)}
+    provs = {"hubble": Named("hubble", [TurnResult(text="x")], log)}
     make(tmp_path, provs, {"stats": False}).run("hi")
     assert stats.load() == []
 
@@ -188,8 +188,8 @@ def test_render_table_smoke():
     from rich.console import Console
     import io
     log = stats.StatsLog()
-    log.call("aihub", "m", True, prompt_tokens=10, completion_tokens=5, duration=0.5, ttft_ms=300)
-    log.task("aihub", "m", True)
+    log.call("hubble", "m", True, prompt_tokens=10, completion_tokens=5, duration=0.5, ttft_ms=300)
+    log.task("hubble", "m", True)
     con = Console(file=io.StringIO(), width=140)
     con.print(stats.render(stats.summarize(stats.load()), 30))
     out = con.file.getvalue()

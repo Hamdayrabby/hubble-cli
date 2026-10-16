@@ -1,5 +1,5 @@
 """
-Configuration for AIHub API testing and CLI.
+Configuration for Hubble API testing and CLI.
 Loads sensitive credentials securely from .env file or environment variables.
 """
 import os

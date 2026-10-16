@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.3.3
+
+- **Complete Deprecation & Removal of `aihub`:**
+  - Removed `aihub` console script alias from `pyproject.toml`, preventing the creation of `aihub.exe`.
+  - Deleted legacy `aihub.exe` executables and uninstalled obsolete `aihub-code` package.
+  - Renamed `DEFAULT_PROVIDER` from `aihub` to `hubble`, aligning the default provider name with Hubble CLI.
+  - Maintained smooth legacy backwards compatibility so existing session histories and settings referencing `aihub` seamlessly map to `hubble`.
+  - Updated all internal references, documentation, examples, and tests to consistently use `hubble`.
+
 ## 4.3.2
 
 - **Compact Modern Block Logo:**

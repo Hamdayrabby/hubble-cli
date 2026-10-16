@@ -113,8 +113,8 @@ def test_newer_version_announced_once_without_redraw_loop(tmp_path):
 
 def test_toolbar_items_wrap_whole_and_stats_keep_own_line():
     from hubble.repl import Repl
-    parts = ["<tb.val>aihub nvidia/nemotron-3-super-120b-a12b</tb.val>", "default shift+tab", "persona code",
-             "context 2%", "checking aihub retry 9/77", "checking hcnsec retry 1/8"]
+    parts = ["<tb.val>hubble nvidia/nemotron-3-super-120b-a12b</tb.val>", "default shift+tab", "persona code",
+             "context 2%", "checking hubble retry 9/77", "checking hcnsec retry 1/8"]
     wide = Repl._pack(parts, 300)
     assert len(wide) == 1
     narrow = Repl._pack(parts, 100)

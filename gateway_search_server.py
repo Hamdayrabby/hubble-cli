@@ -1,7 +1,7 @@
 """Hubble Gateway Search Proxy - Python / FastAPI Server
 
 Routes search queries from Hubble CLI to Tavily using YOUR server-side master key.
-Deploy this alongside your AIHub gateway (or on Railway, Render, Fly.io, or VPS).
+Deploy this alongside your Hubble gateway (or on Railway, Render, Fly.io, or VPS).
 
 Requirements:
     pip install fastapi uvicorn httpx

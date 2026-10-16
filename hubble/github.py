@@ -178,7 +178,7 @@ jobs:
         run: hubble -p --github --permission-mode accept-edits --allow "shell(*)" --no-session
         env:
           HUBBLE_API_KEY: ${{ secrets.HUBBLE_API_KEY }}
-          HUBBLE_BASE_URL: ${{ vars.HUBBLE_BASE_URL }}       # optional; default: the AIHub gateway
+          HUBBLE_BASE_URL: ${{ vars.HUBBLE_BASE_URL }}       # optional; default: the Hubble gateway
           HUBBLE_MODEL: ${{ vars.HUBBLE_MODEL }}             # optional
           GITHUB_TOKEN: ${{ github.token }}
       - name: Push Hubble's edits to the PR
