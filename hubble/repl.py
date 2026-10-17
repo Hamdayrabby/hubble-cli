@@ -446,7 +446,7 @@ class Repl:
         if typed.strip() and cached is not None and cached[2] == budget and cached[3] == size.columns:
             return cached[1]
         elapsed = time.time() - self._home_t0
-        fps_step = int(elapsed * 30)
+        fps_step = int(elapsed * 60)
         if cached and cached[0] == fps_step and cached[2] == budget and cached[3] == size.columns:
             return cached[1]
         status, tips = self._home
@@ -565,7 +565,7 @@ class Repl:
                 if self._home is not None:
                     # Animated home screen lives in the prompt until the first message is sent;
                     # the last frame stays in the scrollback.
-                    text = session.prompt(self._home_message, refresh_interval=1 / 15, reserve_space_for_menu=0)
+                    text = session.prompt(self._home_message, refresh_interval=1 / 60, reserve_space_for_menu=0)
                     self._home = None
                     # PromptSession.prompt() kwargs overwrite the session permanently, not just for
                     # that one call -- without resetting these, every later prompt keeps 0 reserved

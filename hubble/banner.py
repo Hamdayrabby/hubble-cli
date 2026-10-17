@@ -163,7 +163,7 @@ COMPACT = _Art([
 # Kept for callers/tests that refer to the full design's height.
 SCENE_H = FULL.height
 SURFACE = "░▒▓▒░ ░▒ ▒▓▓▒░  ░"       # planet surface bands, scrolled to look like rotation
-FPS = 20
+FPS = 60
 
 # Three parallax layers: (count per 100 columns, speed in columns per second, glyphs, colors dim/bright)
 STAR_LAYERS = [

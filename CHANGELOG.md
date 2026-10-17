@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.3.9
+
+- **Smooth 60 FPS Animation:**
+  - Increased startup home screen refresh rate from 15 FPS to a full 60 FPS (`refresh_interval = 1 / 60`).
+  - Starfield drift, arcade invader march, and gradient color cycling are now buttery-smooth.
+  - Zero keystroke lag is maintained by freezing animation frames the moment user input begins.
+
 ## 4.3.8
 
 - **Ultra-Clean Home Screen (Zero Star Noise & Streamlined Hints):**
