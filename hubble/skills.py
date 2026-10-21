@@ -74,7 +74,10 @@ def discover_skills(root: Path) -> List[Skill]:
     """Project skills come after user skills and win on a name clash (more specific wins)."""
     found: Dict[str, Skill] = {}
     for base, scope in _skill_dirs(root):
-        if not base.is_dir():
+        try:
+            if not base.is_dir():
+                continue
+        except OSError:
             continue
         candidates = sorted(base.glob("*/SKILL.md")) + sorted(base.glob("*.md"))
         for path in candidates:

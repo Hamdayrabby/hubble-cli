@@ -160,10 +160,22 @@ class AnthropicProvider:
         system, msgs = to_anthropic(messages)
         params: Dict[str, Any] = {"model": model, "max_tokens": max_tokens, "messages": msgs}
         if system:
-            # Cache the stable prefix (tools + system prompt) across the turns of a session.
+            # Breakpoint 1: Cache the stable system prompt prefix across turns
             params["system"] = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
         if tools:
-            params["tools"] = to_anthropic_tools(tools)
+            # Breakpoint 2: Cache the tool definitions catalog (on the last tool)
+            t_list = to_anthropic_tools(tools)
+            if t_list:
+                t_list[-1]["cache_control"] = {"type": "ephemeral"}
+            params["tools"] = t_list
+        # Breakpoint 3: Rolling conversation turn anchor
+        # Cache the conversation prefix up to the 2nd-to-last user turn
+        user_msg_indices = [i for i, m in enumerate(msgs) if m.get("role") == "user"]
+        if len(user_msg_indices) >= 2:
+            anchor_idx = user_msg_indices[-2]
+            content_blocks = msgs[anchor_idx].get("content")
+            if isinstance(content_blocks, list) and content_blocks:
+                content_blocks[-1]["cache_control"] = {"type": "ephemeral"}
         # No temperature and no thinking config: current Claude models reject sampling
         # parameters, and pick their own (adaptive) thinking by default.
         return params

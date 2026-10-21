@@ -75,9 +75,9 @@ class Events:
     def notice(self, message: str, level: str = "info"): pass
     def todos(self, todos: List[Dict[str, str]]): pass
     def batch_start(self, count: int): pass
-    def subagent_start(self, key: str, label: str): pass
+    def subagent_start(self, key: str, label: str, model: str = "", context_window: int = 0): pass
     def subagent_step(self, key: str, action: str, is_tool: bool = True): pass
-    def subagent_tokens(self, key: str, tokens: int): pass
+    def subagent_tokens(self, key: str, tokens: int, prompt_tokens: int = 0, completion_tokens: int = 0, context_tokens: int = 0): pass
     def subagent_end(self, key: str, status: str, detail: str = ""): pass
     def batch_end(self): pass
 
@@ -122,6 +122,7 @@ class Agent:
         self.memory = load_memory(ctx.root)
         self.lens = load_lens(ctx.root)
         self.taste = self.lens
+        self._lens_signature = self._compute_lens_signature(self.lens)
         self.skills: List[Skill] = discover_skills(ctx.root) if tools is None else []
         from hubble.subagents import discover_agents
         self.agent_defs = discover_agents(ctx.root) if tools is None else []
@@ -133,6 +134,7 @@ class Agent:
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
         self.context_tokens = 0
+        self.subagent_history: List[Dict[str, Any]] = []
         self.last_stats = RunStats()
         # Shared with sub-agents so Ctrl+C stops every thread of a parallel batch.
         self.cancel = threading.Event()
@@ -146,6 +148,11 @@ class Agent:
         self.last_route = None     # (tier, provider, model, reasons) of the last routed prompt
         self._route = None         # per-task routing state while a routed task runs
         self._served = None        # (provider, model, via_fallback) of the last successful call
+        self.agent_id: str = getattr(ctx, "agent_id", "main") or "main"
+        if hasattr(self.ctx, "message_bus") and self.ctx.message_bus:
+            self.ctx.message_bus.register_agent(self.agent_id, role="coordinator" if not self.is_subagent else "specialist")
+            if self.agent_id == "main":
+                self.ctx.message_bus.register_agent("parent", role="coordinator")
 
     def start_session(self, source: str = "startup"):
         """Run SessionStart hooks once. source: startup | resume | clear."""
@@ -232,10 +239,36 @@ class Agent:
         from hubble.subagents import discover_agents
         self.agent_defs = discover_agents(self.ctx.root)
 
+    def _compute_lens_signature(self, lens: Optional[List[Tuple[Path, str]]] = None):
+        target = self.lens if lens is None else lens
+        sig = []
+        for p, text in target:
+            try:
+                mtime = p.stat().st_mtime_ns
+            except OSError:
+                mtime = None
+            sig.append((str(p), mtime, hash(text)))
+        return tuple(sig)
+
+    def check_and_update_lens(self) -> bool:
+        new_lens = load_lens(self.ctx.root)
+        new_sig = self._compute_lens_signature(new_lens)
+        old_normalized = [(str(p), text) for p, text in (self.lens or [])]
+        new_normalized = [(str(p), text) for p, text in new_lens]
+        if new_normalized != old_normalized:
+            self.lens = new_lens
+            self.taste = new_lens
+            self._lens_signature = new_sig
+            file_count = len(new_lens)
+            plural = "s" if file_count != 1 else ""
+            self.events.notice(f"Developer lens updated ({file_count} file{plural} active)", "info")
+            return True
+        self._lens_signature = new_sig
+        return False
+
     def reload_memory(self):
         self.memory = load_memory(self.ctx.root)
-        self.lens = load_lens(self.ctx.root)
-        self.taste = self.lens
+        self.check_and_update_lens()
 
     def _append(self, message: Dict[str, Any]):
         self.messages.append(message)
@@ -251,6 +284,7 @@ class Agent:
     def clear(self):
         self.messages = []
         self.context_tokens = 0
+        self.subagent_history = []
         self.ctx.reset_state()
 
     def add_user_message(self, content: str, images: Optional[List[str]] = None):
@@ -261,8 +295,17 @@ class Agent:
         from hubble.images import user_content
         self._append({"role": "user", "content": user_content(content, images)})
 
+    def effective_context_window(self) -> int:
+        if not self.settings.get("context_window_auto", True):
+            return int(self.settings.get("context_window", 128000)) or 1
+        explicit = self.settings.get("context_window")
+        if explicit and explicit != 128000:
+            return int(explicit)
+        from hubble.settings import detect_context_window
+        return detect_context_window(self.model, default=128000)
+
     def context_ratio(self) -> float:
-        window = int(self.settings.get("context_window", 128000)) or 1
+        window = self.effective_context_window()
         return self.context_tokens / window
 
     # ----- main loop -----------------------------------------------------
@@ -338,6 +381,7 @@ class Agent:
         return True
 
     def _run(self, prompt: str, images: Optional[List[str]] = None) -> str:
+        self.check_and_update_lens()
         stats = RunStats()
         self.last_stats = stats
         if not self.is_subagent:
@@ -382,7 +426,14 @@ class Agent:
         finally:
             self._partial_text = ""
 
-    _partial_text = ""
+    def interrupt(self):
+        """Signal the agent to stop its current turn immediately."""
+        self.cancel.set()
+
+    def _on_reasoning(self, delta: str):
+        if self.cancel.is_set():
+            raise KeyboardInterrupt
+        self.events.reasoning(delta)
 
     def _on_text(self, delta: str):
         if self.cancel.is_set():
@@ -402,6 +453,14 @@ class Agent:
         for turn in range(max_turns):
             if self.cancel.is_set():
                 raise KeyboardInterrupt
+            if hasattr(self.ctx, "message_bus") and self.ctx.message_bus:
+                agent_id = getattr(self, "agent_id", "main") or "main"
+                incoming = self.ctx.message_bus.receive(agent_id)
+                if agent_id == "main":
+                    incoming.extend(self.ctx.message_bus.receive("parent"))
+                if incoming:
+                    msg_text = "\n\n".join(f"[From @{m.sender}]:\n{m.content}" for m in incoming)
+                    self._append({"role": "user", "content": f"<incoming-messages>\n{msg_text}\n</incoming-messages>"})
             left = max_turns - turn
             if self.is_subagent and left == 3:
                 self._note_on_last_tool_result(
@@ -428,6 +487,7 @@ class Agent:
                 self.events.notice(f"Context {self.context_ratio():.0%} full; compacting...", "warn")
                 self.compact(mid_turn=True)
 
+            self.check_and_update_lens()
             self._partial_text = ""
             self.events.turn_start()
             result = self._stream_with_fallback(schemas)
@@ -483,10 +543,13 @@ class Agent:
                 self._append({"role": "tool", "tool_call_id": call.id, "name": call.name, "content": output})
                 self.context_tokens += estimate_tokens(output)
                 if self._route:
-                    failed = output.startswith(("Error:", "Permission denied", "Blocked by hook", "The user denied"))
+                    failed = output.startswith(("Error:", "Permission denied", "Blocked by hook", "The user denied")) or (
+                        "[exit code " in output and not output.rstrip().endswith("[exit code 0]")
+                    )
                     self._route["struggle"].note_tool(output, failed)
             self._maybe_escalate()
             progress.note(result.tool_calls)
+            self.check_and_update_lens()
             if self.is_subagent and len(self.messages) > 8:
                 self._virtualize_old_observations()
 
@@ -523,8 +586,9 @@ class Agent:
         has found, instead of returning nothing and throwing all of its reading away."""
         self.events.notice(f"wrapping up: {reason}", "dim")
         self._note_on_last_tool_result(
-            f"[Hubble: {reason}. Do NOT call any more tools. Write your final report now from "
-            "what you have found so far, and list what you could not check.]")
+            f"[Hubble: {reason}. Do NOT call any more tools. Write your final report now based strictly "
+            "on verified data found so far, and explicitly state what could not be completed or verified "
+            "rather than guessing or hallucinating missing details.]")
         try:
             result = self._stream_with_fallback(schemas)
             self._account(result, stats)
@@ -555,7 +619,7 @@ class Agent:
         messages = [{"role": "system", "content": self.system_prompt()}] + self.messages
         kwargs = dict(tools=schemas, temperature=self.temperature,
                       max_tokens=int(self.settings.get("max_tokens", 8192)),
-                      on_text=self._on_text, on_reasoning=self.events.reasoning)
+                      on_text=self._on_text, on_reasoning=self._on_reasoning)
         self._served = (self.provider_name, self.model, False)
         started = time.time()
         try:
@@ -726,8 +790,7 @@ class Agent:
                                             "tool": tool.name, "target": target}, name=tool.name)
             answer, feedback = self.events.ask(tool, args, preview)
             if answer == "always":
-                rule = self.permissions.always_rule(tool.name, tool.kind, target)
-                self.events.notice(f"Allowed for this session: {rule}")
+                self.permissions.always_rule(tool.name, tool.kind, target)
             elif answer != "yes":
                 output = "The user denied this tool call."
                 if feedback:
@@ -746,6 +809,8 @@ class Agent:
             self.events.todos(self.ctx.todos)
         elif tool.name == "write_skill" and not is_error:
             self.reload_skills()
+        elif tool.name in ("write_file", "edit_file", "apply_patch", "shell") and not is_error:
+            self.check_and_update_lens()
         return output
 
     # ----- context management -------------------------------------------
@@ -768,7 +833,8 @@ class Agent:
                 for tc in m.get("tool_calls") or []:
                     text += f"\n[calls {tc['function']['name']}({truncate(tc['function']['arguments'], 400)})]"
                 lines.append(f"[{role}]\n{text}")
-        budget = int(int(self.settings.get("context_window", 128000)) * 3.8 * 0.6)
+        window = self.effective_context_window()
+        budget = int(window * 3.8 * 0.6)
         transcript = truncate("\n\n".join(lines), budget)
         instruction = COMPACT_PROMPT + (f"\nFocus especially on: {focus}" if focus else "")
         summary = ""
@@ -843,14 +909,14 @@ class _Progress:
             args = call.arguments
         return f"{call.name}:{args}"
 
-    CHANGES = {"write_file", "edit_file", "apply_patch", "shell", "write_skill", "task"}
+    CHANGES = {"write_file", "edit_file", "apply_patch", "write_skill", "task"}
 
     def note(self, calls: List[ToolCall]):
         if not calls:
             return
         if any(c.name in self.CHANGES for c in calls):
-            # Something may have changed (a file edited, tests run): re-reading a file or re-running
-            # the tests after that is progress, not a loop. Start counting afresh.
+            # Something changed (a file edited, task delegated): re-reading a file or re-running
+            # tests after that is progress, not a loop. Start counting afresh.
             self.seen.clear()
             self.idle = 0
             for c in calls:
@@ -879,6 +945,7 @@ class _SubagentEvents(Events):
         self.parent = parent
         self.label = label
         self.key = key
+        self.sub_agent: Optional[Agent] = None
 
     def turn_start(self):
         self.parent.subagent_step(self.key, "thinking", is_tool=False)
@@ -888,11 +955,23 @@ class _SubagentEvents(Events):
         self.parent.subagent_step(self.key, f"{verb} {describe_call(tool, args)}".strip())
 
     def turn_end(self, result):
-        used = result.usage.get("total_tokens") or (
-            result.usage.get("prompt_tokens", 0) + result.usage.get("completion_tokens", 0))
+        prompt_tokens = result.usage.get("prompt_tokens", 0)
+        completion_tokens = result.usage.get("completion_tokens", 0)
+        used = result.usage.get("total_tokens") or (prompt_tokens + completion_tokens)
         if not used:
             used = estimate_tokens(result.text + result.reasoning)
-        self.parent.subagent_tokens(self.key, used)
+            completion_tokens = used
+        ctx_tokens = getattr(self.sub_agent, "context_tokens", 0) if self.sub_agent else 0
+        try:
+            self.parent.subagent_tokens(
+                self.key,
+                used,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                context_tokens=ctx_tokens,
+            )
+        except TypeError:
+            self.parent.subagent_tokens(self.key, used)
 
     def notice(self, message, level="info"):
         if level in ("warn", "error"):
@@ -941,8 +1020,12 @@ class TaskTool(Tool):
             "isolation": {"type": "string", "enum": ["none", "worktree"],
                           "description": "edit only. worktree: work in a fresh git worktree on its own branch, "
                                          "so the main checkout is untouched until you review and merge"},
+            "auto_merge": {"type": "boolean",
+                           "description": "edit + worktree only: automatically squash-merge the isolated branch back into the main checkout upon successful completion"},
             "budget": {"type": "integer",
                        "description": "Optional token budget for this task (default: 400,000; up to 2,000,000 for deep research or complex multi-file tasks)"},
+            "fork_context": {"type": "boolean",
+                             "description": "Fork parent conversation context so subagent has full access to prior conversation history"},
         }
         defs = self._defs()
         if defs:
@@ -979,7 +1062,9 @@ class TaskTool(Tool):
             if spec is None:
                 raise ToolError(f"no agent named '{agent_name}'. Available: {', '.join(all_defs) or '(none)'}")
         edit = (spec.capability if spec else args.get("capability")) == "edit"
+        fork = bool(args.get("fork_context") or (spec and getattr(spec, "fork_context", False)))
         isolated = None
+        key = f"task-{next(_task_ids)}"
         work_root = ctx.root
         iso = str(args.get("isolation") or "none").lower()
         if edit and iso in ("worktree", "branch", "share"):
@@ -995,7 +1080,13 @@ class TaskTool(Tool):
                               sandbox=ctx.sandbox, sandbox_image=ctx.sandbox_image,
                               sandbox_memory=ctx.sandbox_memory, sandbox_cpus=ctx.sandbox_cpus,
                               sandbox_network=ctx.sandbox_network, sandbox_writable=ctx.sandbox_writable,
-                              allow_unsandboxed=ctx.allow_unsandboxed)
+                              allow_unsandboxed=ctx.allow_unsandboxed,
+                              process_manager=ctx.process_manager,
+                              agent_id=key, message_bus=ctx.message_bus)
+        if hasattr(ctx, "message_bus") and ctx.message_bus:
+            ctx.message_bus.register_agent(key, role=spec.name if spec else (args.get("description") or "task"))
+            if spec:
+                ctx.message_bus.register_agent(spec.name, role=spec.description)
         if edit:
             # Full toolset except task/invoke_subagent/define_subagent/write_skill: an edit sub-agent does its own assigned job,
             # it does not spawn further sub-agents or rewrite the project's skills.
@@ -1049,12 +1140,17 @@ class TaskTool(Tool):
             candidates.append((p.provider_name, p.model))
         candidates = candidates[:3]  # the first choice plus at most two retries
 
-        key = f"task-{next(_task_ids)}"
         base_label = label
         first = candidates[0]
         if first != (p.provider_name, p.model):
             label = f"{base_label} · {first[1]}"
-        p.events.subagent_start(key, label)
+        first_prov, first_model = candidates[0]
+        from hubble.settings import detect_context_window
+        first_window = detect_context_window(first_model)
+        try:
+            p.events.subagent_start(key, label, model=first_model, context_window=first_window)
+        except TypeError:
+            p.events.subagent_start(key, label)
         status, detail = "failed", "crashed"
         subs: List[Agent] = []
         try:
@@ -1066,24 +1162,40 @@ class TaskTool(Tool):
                     continue
                 if attempt:
                     p.events.subagent_step(key, f"retrying on {model}", is_tool=False)
+                    if hasattr(p.events, "board") and p.events.board:
+                        try:
+                            p.events.board.set_model(key, model, detect_context_window(model))
+                        except Exception:
+                            pass
                 # A high backstop only: sub-agents normally end on their own, or on the progress
                 # and token checks in _loop. Long runs compact their history like the main agent.
                 steps = int(p.settings.get("subagent_max_turns") or 150)
                 sub_settings = {**p.settings, "model": model, "max_turns": steps,
                                 "auto_compact_ratio": float(p.settings.get("auto_compact_ratio", 0.8))}
+                from hubble.settings import detect_context_window
+                model_window = detect_context_window(model)
+                base_budget = int(p.settings.get("subagent_token_budget") or 400_000)
                 if args.get("budget"):
                     try:
                         sub_settings["subagent_token_budget"] = max(100, min(10_000_000, int(args["budget"])))
                     except (ValueError, TypeError):
-                        pass
+                        sub_settings["subagent_token_budget"] = base_budget
+                else:
+                    if model_window <= 32768:
+                        sub_settings["subagent_token_budget"] = min(base_budget, max(30_000, model_window * 3))
+                    else:
+                        sub_settings["subagent_token_budget"] = base_budget
+                sub_events = _SubagentEvents(p.events, base_label, key)
                 sub = Agent(client, sub_settings,
-                            sub_ctx, perms, _SubagentEvents(p.events, label, key), tools=tools,
+                            sub_ctx, perms, sub_events, tools=tools,
                             system_override=f"{system}\n\nWork efficiently: call several tools in one step "
                                             "when they are independent (e.g. read three files at once), "
                                             "never repeat a call you already made, and write your report "
                                             "as soon as you can answer; do not read everything. If you stop "
                                             "making progress you will be asked to report what you have.")
+                sub_events.sub_agent = sub
                 subs.append(sub)
+                sub.agent_id = key
                 sub.cancel = p.cancel
                 sub.is_subagent = True
                 sub.provider_name = prov
@@ -1091,6 +1203,8 @@ class TaskTool(Tool):
                 sub.fallback_resolver = p.fallback_resolver
                 sub.stats_log = p.stats_log
                 sub.client_for = p.client_for
+                if fork:
+                    sub.messages = [dict(m) for m in p.messages]
                 report = sub.run(args["prompt"])
                 if sub.last_stats.interrupted:
                     status, detail = "stopped", "stopped by user"
@@ -1122,13 +1236,30 @@ class TaskTool(Tool):
                 from hubble import worktree
                 rel = ctx.rel(work_root)
                 branch = isolated["branch"]
+                name = isolated["name"]
                 sha = worktree.commit_all(work_root, f"hubble task: {label}")
+                auto_merge = bool(args.get("auto_merge") or args.get("merge"))
                 if sha:
                     stat = worktree._git(work_root, "show", "--stat", "--format=", "HEAD", check=False)
-                    report += (f"\n\n<worktree path=\"{rel}\" branch=\"{branch}\" commit=\"{sha}\">\n{stat}\n</worktree>\n"
-                               f"These changes are committed on branch {branch} only; the main checkout is "
-                               f"untouched. Review with `git show {sha}`; if they are right, bring them in with "
-                               f"`git cherry-pick {sha}` (or `git merge {branch}`), or tell the user they can.")
+                    if auto_merge:
+                        m_res = worktree.merge_worktree(ctx.root, name, squash=True)
+                        if m_res.get("success"):
+                            report += (f"\n\n### 🔀 Synthetic PR: {label} (Merged)\n"
+                                       f"- **Worktree Branch**: `{branch}` (squash-merged into `{m_res.get('target', 'main')}`)\n"
+                                       f"- **Merge Commit**: `{m_res.get('commit', sha)}`\n"
+                                       f"- **Diffstat**:\n```\n{m_res.get('diffstat') or stat}\n```\n"
+                                       f"Successfully merged isolated worktree changes into the main checkout.")
+                        else:
+                            report += (f"\n\n### ⚠️ Synthetic PR: {label} (Merge Conflict)\n"
+                                       f"- **Worktree Branch**: `{branch}`\n"
+                                       f"- **Conflict Error**: {m_res.get('error', 'Merge conflict')}\n"
+                                       f"- **Commit**: `{sha}`\n"
+                                       f"Manual merge required: `git merge {branch}` in the main checkout.")
+                    else:
+                        report += (f"\n\n<worktree path=\"{rel}\" branch=\"{branch}\" commit=\"{sha}\">\n{stat}\n</worktree>\n"
+                                   f"These changes are committed on branch {branch} only; the main checkout is "
+                                   f"untouched. Review with `git show {sha}`; if they are right, bring them in with "
+                                   f"`git cherry-pick {sha}` (or `git merge {branch}`), or tell the user they can.")
                 else:
                     st = worktree.status(work_root)
                     report += (f"\n\n<worktree path=\"{rel}\" branch=\"{branch}\">\n"
@@ -1141,9 +1272,31 @@ class TaskTool(Tool):
                 report += f"\n\n<hook-context>\n{stop.additional_context}\n</hook-context>"
             return report
         finally:
+            if hasattr(ctx, "message_bus") and ctx.message_bus:
+                ctx.message_bus.unregister_agent(key)
+                if spec:
+                    ctx.message_bus.unregister_agent(spec.name)
             for sub in subs:
                 p.total_prompt_tokens += sub.total_prompt_tokens
                 p.total_completion_tokens += sub.total_completion_tokens
+                from hubble.settings import detect_context_window
+                sub_win = detect_context_window(sub.model) if sub.model else 128000
+                tool_calls_cnt = sub.last_stats.tool_calls if hasattr(sub, "last_stats") else 0
+                dur = sub.last_stats.duration if hasattr(sub, "last_stats") else 0.0
+                p.subagent_history.append({
+                    "key": key,
+                    "label": base_label,
+                    "model": sub.model,
+                    "provider": sub.provider_name,
+                    "prompt_tokens": sub.total_prompt_tokens,
+                    "completion_tokens": sub.total_completion_tokens,
+                    "total_tokens": sub.total_prompt_tokens + sub.total_completion_tokens,
+                    "context_tokens": sub.context_tokens,
+                    "context_window": sub_win,
+                    "status": status,
+                    "tool_calls": tool_calls_cnt,
+                    "duration": dur,
+                })
             p.events.subagent_end(key, status, detail)
 
 
@@ -1181,8 +1334,16 @@ class InvokeSubagentTool(TaskTool):
                 "enum": ["inherit", "branch", "share", "none", "worktree"],
                 "description": "inherit/none (shares workspace) or branch/share/worktree (isolated git branch)",
             },
+            "auto_merge": {
+                "type": "boolean",
+                "description": "Automatically squash-merge the isolated branch back into the main checkout upon successful completion",
+            },
             "model": {"type": "string", "description": "Optional model override (e.g. 'provider:model')"},
             "budget": {"type": "integer", "description": "Optional token budget (default: 400,000; up to 2,000,000)"},
+            "fork_context": {
+                "type": "boolean",
+                "description": "Fork parent conversation context so subagent has full access to prior conversation history",
+            },
         }
         if defs:
             props["subagent_type"]["enum"] = sorted(defs)
@@ -1216,6 +1377,8 @@ class DefineSubagentTool(Tool):
             "tools": {"type": "array", "items": {"type": "string"}, "description": "Optional tool restriction list"},
             "model": {"type": "string", "description": "Optional model override for this subagent"},
             "scope": {"type": "string", "enum": ["project", "user"], "description": "project (.hubble/agents/) or user (~/.hubble/agents/). Default: project"},
+            "color": {"type": "string", "description": "Color highlight for this agent badge/name (e.g. 'magenta', 'cyan', 'green', 'yellow', 'blue', 'red')"},
+            "fork_context": {"type": "boolean", "description": "Whether this subagent automatically inherits/forks parent conversation context"},
         },
         "required": ["name", "description", "system_prompt"],
     }
@@ -1235,6 +1398,8 @@ class DefineSubagentTool(Tool):
         cap = args.get("capability") or "read_only"
         tools_list = args.get("tools")
         scope = args.get("scope") or "project"
+        color = args.get("color", "")
+        fork_context = bool(args.get("fork_context", False))
 
         save_agent_definition(
             root=ctx.root,
@@ -1245,6 +1410,8 @@ class DefineSubagentTool(Tool):
             tools=tools_list,
             model=args.get("model", ""),
             scope=scope,
+            color=color,
+            fork_context=fork_context,
         )
         self.parent.agent_defs = discover_agents(ctx.root)
         return (f"Successfully defined subagent '{name}' ({scope} scope). "
@@ -1268,6 +1435,8 @@ def describe_call(tool: Tool, args: Dict[str, Any]) -> str:
         return args.get("url", "")
     if tool.name == "todo_write":
         return f"{len(args.get('todos') or [])} items"
+    if tool.name == "send_message":
+        return f"to @{args.get('recipient')}: {str(args.get('message', ''))[:60]}"
     if tool.name == "symbols":
         return args.get("query") or args.get("path") or "workspace outline"
     if tool.name == "read_file" and (args.get("offset") or args.get("limit")):

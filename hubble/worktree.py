@@ -8,7 +8,7 @@ to .git/info/exclude so it never shows up as untracked files.
 import re
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 NAME_RX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,60}$")
 
@@ -143,3 +143,117 @@ def remove(path: Path, name: str, force: bool = False, delete_branch: bool = Fal
 
 def current_branch(path: Path) -> str:
     return _git(path, "rev-parse", "--abbrev-ref", "HEAD", check=False)
+
+
+def diff_worktree(path: Path, base_branch: str = "") -> str:
+    """Return unified diff of all changes in the worktree against base_branch."""
+    repo = main_repo(path)
+    if repo is None:
+        raise WorktreeError(f"{path} is not inside a git repository")
+    if not base_branch:
+        base_branch = current_branch(repo) or "main"
+
+    # In git, diffing base_branch from within the worktree path compares base_branch
+    # against the current working tree of the worktree (both committed and uncommitted).
+    diff = _git(path, "diff", base_branch, check=False)
+    if not diff:
+        diff = _git(path, "diff", f"{base_branch}...HEAD", check=False)
+    if not diff:
+        diff = _git(path, "diff", "HEAD", check=False)
+    return diff
+
+
+def merge_worktree(path: Path, name: str, squash: bool = True, delete_branch: bool = True,
+                   message: str = "") -> Dict[str, Any]:
+    """Merge an isolated worktree branch back into the main repo branch."""
+    repo = main_repo(path)
+    if repo is None:
+        raise WorktreeError("not inside a git repository")
+    dest = repo / ".hubble" / "worktrees" / name
+    branch = f"hubble/{name}"
+    target = current_branch(repo) or "main"
+
+    # Commit any remaining uncommitted changes in the worktree
+    if dest.exists():
+        commit_all(dest, f"hubble: changes from {name}")
+
+    # Check if branch exists
+    exists = _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", check=False)
+    if not exists:
+        raise WorktreeError(f"branch '{branch}' does not exist")
+
+    diffstat = _git(repo, "diff", "--stat", f"{target}..{branch}", check=False)
+    if not diffstat:
+        diffstat = _git(repo, "diff", "--stat", target, branch, check=False)
+
+    default_msg = message or f"Merge worktree '{name}' (squash)\n\nMerged branch {branch} into {target}"
+
+    if squash:
+        proc = subprocess.run(["git", "merge", "--squash", branch], cwd=repo, capture_output=True, text=True)
+        if proc.returncode != 0:
+            subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=repo, capture_output=True, text=True)
+            return {
+                "success": False,
+                "merged": False,
+                "conflict": True,
+                "branch": branch,
+                "target": target,
+                "diffstat": diffstat,
+                "error": f"Merge conflict during squash merge: {(proc.stderr or proc.stdout).strip()[:300]}",
+            }
+        status_out = _git(repo, "status", "--porcelain", check=False)
+        if status_out:
+            cproc = subprocess.run(
+                ["git", "-c", "user.name=Hubble", "-c", "user.email=hubble@localhost",
+                 "commit", "-q", "--no-verify", "-m", default_msg],
+                cwd=repo, capture_output=True, text=True
+            )
+            if cproc.returncode != 0 and "nothing to commit" not in (cproc.stderr + cproc.stdout):
+                return {
+                    "success": False,
+                    "merged": False,
+                    "conflict": False,
+                    "branch": branch,
+                    "target": target,
+                    "diffstat": diffstat,
+                    "error": f"Commit failed after squash merge: {(cproc.stderr or cproc.stdout).strip()[:300]}",
+                }
+    else:
+        msg = message or f"Merge branch '{branch}' into {target}"
+        proc = subprocess.run(
+            ["git", "-c", "user.name=Hubble", "-c", "user.email=hubble@localhost",
+             "merge", "--no-ff", "-m", msg, branch],
+            cwd=repo, capture_output=True, text=True
+        )
+        if proc.returncode != 0:
+            _git(repo, "merge", "--abort", check=False)
+            return {
+                "success": False,
+                "merged": False,
+                "conflict": True,
+                "branch": branch,
+                "target": target,
+                "diffstat": diffstat,
+                "error": f"Merge conflict during merge: {(proc.stderr or proc.stdout).strip()[:300]}",
+            }
+
+    sha = _git(repo, "rev-parse", "--short", "HEAD", check=False)
+    # Cleanup worktree
+    if dest.exists():
+        try:
+            remove(repo, name, force=True, delete_branch=delete_branch)
+        except WorktreeError:
+            pass
+    elif delete_branch:
+        _git(repo, "branch", "-D", branch, check=False)
+
+    return {
+        "success": True,
+        "merged": True,
+        "conflict": False,
+        "branch": branch,
+        "target": target,
+        "commit": sha,
+        "diffstat": diffstat,
+        "squash": squash,
+    }

@@ -18,7 +18,8 @@ MODE_HELP = {
     "yolo": "auto-approve everything except deny rules",
 }
 ALIASES = {"bash": "shell", "run": "shell", "edit": "edit_file", "write": "write_file",
-           "patch": "apply_patch", "read": "read_file", "ls": "list_dir", "find": "glob", "todo": "todo_write"}
+           "patch": "apply_patch", "read": "read_file", "ls": "list_dir", "find": "glob", "todo": "todo_write",
+           "tasks": "manage_task", "msg": "send_message", "message": "send_message"}
 # A command may ride on a pattern allow rule only if it is one plain program invocation:
 # no separators, subexpressions, redirects, variables or quotes in any shell (cmd, PowerShell, bash).
 SAFE_COMMAND = re.compile(r"^[\w ./:=+,@\-]+$")
@@ -97,6 +98,8 @@ class Permissions:
         if rule:
             return "deny", f"blocked by deny rule {rule}"
         if kind == "read":
+            return "allow", ""
+        if tool == "manage_task" and target.strip().startswith(("list", "status")):
             return "allow", ""
         if self.mode == "plan" and kind != "web":  # fetching docs is fine while planning
             return "deny", ("plan mode is read-only. Finish exploring, then present your plan; "

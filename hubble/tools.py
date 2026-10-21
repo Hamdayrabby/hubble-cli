@@ -4,8 +4,10 @@ Every path is confined to the workspace root (plus configured additional_dirs),
 secret files are refused, and file changes are snapshotted for /undo.
 """
 
+import ast
 import difflib
 import fnmatch
+import json
 import os
 import re
 import shutil
@@ -16,9 +18,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from hubble.messaging import MessageBus, default_message_bus
+from hubble.process import ProcessManager, default_process_manager
+
 MAX_OUTPUT_CHARS = 30000
 MAX_READ_LINES = 2000
-MAX_LINE_CHARS = 2000
+MAX_LINE_CHARS = 50000
 IGNORED_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules", "dist", "build",
                 ".mypy_cache", ".pytest_cache", ".idea", ".tox", ".next", "target"}
 SECRET_NAMES = {"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "credentials", ".netrc", ".pgpass",
@@ -72,6 +77,7 @@ class ToolContext:
     root: Path
     extra_dirs: List[Path] = field(default_factory=list)
     allow_secrets: bool = False
+    allow_external_reads: bool = False  # allow read_file/grep/glob to read existing files outside workspace
     shell_argv: List[str] = field(default_factory=lambda: detect_shell())
     shell_timeout: int = 120
     sandbox: str = "off"  # "off" | "auto" | "native" | "docker" (see sandbox.py)
@@ -85,8 +91,11 @@ class ToolContext:
     todos: List[Dict[str, str]] = field(default_factory=list)
     # One dict per agent turn: absolute path -> original bytes (None if the file did not exist).
     checkpoints: List[Dict[str, Optional[bytes]]] = field(default_factory=list)
+    process_manager: ProcessManager = field(default_factory=lambda: default_process_manager)
+    agent_id: str = "main"
+    message_bus: Any = field(default_factory=lambda: default_message_bus)
 
-    def resolve(self, raw: str) -> Path:
+    def resolve(self, raw: str, write: bool = False) -> Path:
         if not raw or not str(raw).strip():
             raise ToolError("path is required")
         p = Path(str(raw).strip()).expanduser()
@@ -96,6 +105,8 @@ class ToolContext:
         for base in [self.root, *self.extra_dirs]:
             if p == base or p.is_relative_to(base):
                 return p
+        if not write and self.allow_external_reads and p.exists():
+            return p
         raise ToolError(f"'{raw}' is outside the workspace ({self.root}). "
                         "Add the directory to additional_dirs in .hubble/settings.json to allow it.")
 
@@ -142,6 +153,10 @@ class ToolContext:
             self.read_mtimes.pop(key, None)
             restored.append(self.rel(p))
         return restored
+
+    def begin_transaction(self) -> "FileTransaction":
+        return FileTransaction(self)
+
 
 
 def _read_text(p: Path) -> str:
@@ -291,6 +306,68 @@ def _require_fresh_read(p: Path, ctx: ToolContext, verb: str):
         raise ToolError(f"'{ctx.rel(p)}' changed since you last read it. Read it again first.")
 
 
+def validate_code_syntax(path: Path, content: str) -> Optional[str]:
+    """Check code syntax for known file types before writing to disk."""
+    suffix = path.suffix.lower()
+    if suffix == ".py":
+        try:
+            ast.parse(content)
+        except SyntaxError as e:
+            return f"Python syntax error at line {e.lineno}: {e.msg}"
+    elif suffix == ".json":
+        try:
+            json.loads(content)
+        except ValueError as e:
+            return f"JSON syntax error: {e}"
+    return None
+
+
+class FileTransaction:
+    """Two-Phase Commit (2PC) transaction for staging and committing multi-file edits."""
+
+    def __init__(self, ctx: ToolContext):
+        self.ctx = ctx
+        self.staged: Dict[Path, str] = {}
+        self.backups: Dict[Path, Optional[bytes]] = {}
+        self.committed = False
+
+    def stage_write(self, p: Path, content: str, skip_syntax: bool = False):
+        if not skip_syntax:
+            err = validate_code_syntax(p, content)
+            if err:
+                existed = p.exists()
+                orig_err = validate_code_syntax(p, _read_text_strict(p)) if existed else None
+                if not orig_err:
+                    raise ToolError(f"Pre-commit syntax validation failed for {self.ctx.rel(p)}: {err}")
+        if p not in self.backups:
+            self.backups[p] = p.read_bytes() if p.exists() else None
+        self.staged[p] = content
+
+    def commit(self) -> List[str]:
+        written = []
+        try:
+            for p, content in self.staged.items():
+                self.ctx.snapshot(p)
+                _write_text(p, content)
+                self.ctx.read_mtimes[str(p)] = p.stat().st_mtime
+                written.append(self.ctx.rel(p))
+            self.committed = True
+            return written
+        except Exception as e:
+            self.rollback()
+            raise ToolError(f"Transaction commit failed: {e}. All staged files restored.") from e
+
+    def rollback(self):
+        for p, backup in self.backups.items():
+            if backup is None:
+                if p.exists():
+                    p.unlink()
+            else:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(backup)
+        self.staged.clear()
+
+
 class WriteFile(Tool):
     name = "write_file"
     description = ("Create a new file or completely overwrite an existing one. Prefer edit_file for "
@@ -298,28 +375,37 @@ class WriteFile(Tool):
     parameters = {"type": "object", "properties": {
         "path": {"type": "string", "description": "File path relative to the workspace root"},
         "content": {"type": "string", "description": "Full file content"},
+        "skip_syntax_check": {"type": "boolean", "description": "Skip pre-commit syntax check (default false)"},
     }, "required": ["path", "content"]}
     kind = "edit"
 
     def precheck(self, args, ctx):
-        p = ctx.resolve(args["path"])
+        p = ctx.resolve(args["path"], write=True)
         ctx.check_secret(p)
         if p.is_dir():
             raise ToolError(f"'{args['path']}' is a directory")
         _require_fresh_read(p, ctx, "overwrite")
 
     def preview(self, args, ctx):
-        p = ctx.resolve(args["path"])
+        p = ctx.resolve(args["path"], write=True)
         old = _read_text(p) if p.is_file() else ""
         return unified_diff(old, args.get("content", ""), ctx.rel(p)) or "(no changes)"
 
     def run(self, args, ctx):
-        p = ctx.resolve(args["path"])
+        p = ctx.resolve(args["path"], write=True)
         ctx.check_secret(p)
         if p.is_dir():
             raise ToolError(f"'{args['path']}' is a directory")
         _require_fresh_read(p, ctx, "overwrite")
         content = args["content"]
+        if not args.get("skip_syntax_check"):
+            err = validate_code_syntax(p, content)
+            if err:
+                existed = p.exists()
+                orig_err = validate_code_syntax(p, _read_text_strict(p)) if existed else None
+                if not orig_err:
+                    raise ToolError(f"Pre-commit syntax validation failed for {ctx.rel(p)}: {err}. "
+                                    "Write was rejected to prevent corrupting the file.")
         existed = p.exists()
         if existed and "\r\n" in _read_text_strict(p) and "\r\n" not in content:
             content = content.replace("\n", "\r\n")
@@ -340,11 +426,12 @@ class EditFile(Tool):
         "old_string": {"type": "string", "description": "Exact text to replace"},
         "new_string": {"type": "string", "description": "Replacement text"},
         "replace_all": {"type": "boolean", "description": "Replace every occurrence (default false)"},
+        "skip_syntax_check": {"type": "boolean", "description": "Skip pre-commit syntax check (default false)"},
     }, "required": ["path", "old_string", "new_string"]}
     kind = "edit"
 
     def _apply(self, args, ctx):
-        p = ctx.resolve(args["path"])
+        p = ctx.resolve(args["path"], write=True)
         ctx.check_secret(p)
         if not p.is_file():
             raise ToolError(f"File not found: {args['path']}. Use write_file to create it.")
@@ -364,6 +451,21 @@ class EditFile(Tool):
             if span:
                 start, end = span
                 replacement = new.strip("\r\n").replace("\r\n", "\n")
+                if crlf:
+                    replacement = replacement.replace("\n", "\r\n")
+                return p, text, text[:start] + replacement + text[end:], 1
+        if count == 0 and any(re.match(r"^\s*\d+\s*\|\s*", line) for line in old.splitlines()):
+            # Strip line-number prefixes (e.g. '  14 | ') copied from read_file
+            c_old_lines = [re.sub(r"^\s*\d+\s*\|\s*", "", line) for line in old.splitlines()]
+            c_old = "\r\n".join(c_old_lines) if crlf else "\n".join(c_old_lines)
+            c_new_lines = [re.sub(r"^\s*\d+\s*\|\s*", "", line) for line in new.splitlines()]
+            c_new = "\r\n".join(c_new_lines) if crlf else "\n".join(c_new_lines)
+            if text.count(c_old) == 1:
+                return p, text, text.replace(c_old, c_new, 1), 1
+            span = _loose_line_match(text, c_old)
+            if span:
+                start, end = span
+                replacement = c_new.strip("\r\n").replace("\r\n", "\n")
                 if crlf:
                     replacement = replacement.replace("\n", "\r\n")
                 return p, text, text[:start] + replacement + text[end:], 1
@@ -394,11 +496,19 @@ class EditFile(Tool):
     def run(self, args, ctx):
         p, text, updated, count = self._apply(args, ctx)
         _require_fresh_read(p, ctx, "edit")
+        if not args.get("skip_syntax_check"):
+            err = validate_code_syntax(p, updated)
+            if err:
+                orig_err = validate_code_syntax(p, text)
+                if not orig_err:
+                    raise ToolError(f"Pre-commit syntax validation failed for {ctx.rel(p)}: {err}. "
+                                    "Edit was rejected to prevent corrupting the file.")
         ctx.snapshot(p)
         _write_text(p, updated)
         ctx.read_mtimes[str(p)] = p.stat().st_mtime
         n = count if args.get("replace_all") else 1
         return f"Edited {ctx.rel(p)} ({n} replacement{'s' if n != 1 else ''})"
+
 
 
 @dataclass
@@ -456,29 +566,67 @@ def parse_unified_diff(patch_str: str) -> List[_DiffHunk]:
     return hunks
 
 
-def apply_unified_patch_with_count(original_text: str, patch_str: str, path_for_err: str = "") -> Tuple[str, int]:
-    """Apply a unified diff patch string to original_text.
+def split_patch_into_hunks(patch_str: str) -> List[str]:
+    """Split a multi-hunk unified diff patch into individual single-hunk patch strings."""
+    hunks = parse_unified_diff(patch_str)
+    header_lines = []
+    for line in patch_str.splitlines():
+        if line.startswith("@@"):
+            break
+        if line.startswith(("---", "+++", "diff --git", "index ")):
+            header_lines.append(line)
+    hdr = "\n".join(header_lines) + ("\n" if header_lines else "")
 
-    Returns (updated_text, hunk_count).
-    Supports fuzzy offset matching (up to +-100 lines), stripped whitespace matching,
-    and CRLF/LF line ending preservation.
+    result = []
+    for h in hunks:
+        hunk_lines = [f"@@ -{h.old_start},{h.old_lines} +{h.new_start},{h.new_lines} @@"] + h.lines
+        result.append(hdr + "\n".join(hunk_lines) + "\n")
+    return result
+
+
+def apply_selected_hunks(
+    original_text: str,
+    patch_str: str,
+    selected_hunk_indices: Optional[List[int]] = None,
+    path_for_err: str = ""
+) -> Tuple[str, int]:
+    """Apply a unified diff patch string to original_text, optionally filtering by hunk indices.
+
+    Returns (updated_text, applied_hunk_count).
+    Supports selective hunk staging, fuzzy offset matching (up to +-100 lines),
+    stripped whitespace matching, and CRLF/LF line ending preservation.
     """
     hunks = parse_unified_diff(patch_str)
     is_crlf = "\r\n" in original_text
     has_trailing_newline = (not original_text) or original_text.endswith("\n") or original_text.endswith("\r\n")
 
-    # Check if the last hunk ends with a '\ No newline at end of file' directive
-    for hline in reversed(hunks[-1].lines):
-        if hline.startswith("\\"):
-            has_trailing_newline = False
-            break
-        elif hline.startswith(("+", "-")):
+    if selected_hunk_indices is not None:
+        target_indices = {i for i in selected_hunk_indices if 0 <= i < len(hunks)}
+    else:
+        target_indices = set(range(len(hunks)))
+
+    if not target_indices:
+        return original_text, 0
+
+    # Check if the last applied hunk ends with a '\ No newline at end of file' directive
+    for hunk_idx in sorted(target_indices, reverse=True):
+        last_hunk = hunks[hunk_idx]
+        found_nl_directive = False
+        for hline in reversed(last_hunk.lines):
+            if hline.startswith("\\"):
+                has_trailing_newline = False
+                found_nl_directive = True
+                break
+            elif hline.startswith(("+", "-")):
+                break
+        if found_nl_directive:
             break
 
     file_lines = original_text.replace("\r\n", "\n").splitlines()
     line_offset = 0
+    applied_count = 0
 
-    for hunk in hunks:
+    for i, hunk in enumerate(hunks):
         old_hunk_lines: List[str] = []
         new_hunk_lines: List[str] = []
         for hline in hunk.lines:
@@ -492,6 +640,9 @@ def apply_unified_patch_with_count(original_text: str, patch_str: str, path_for_
                 new_hunk_lines.append(hline[1:])
             elif hline.startswith("\\"):
                 continue
+
+        if i not in target_indices:
+            continue
 
         target_idx = max(0, min(hunk.old_start - 1 + line_offset, len(file_lines)))
 
@@ -537,13 +688,13 @@ def apply_unified_patch_with_count(original_text: str, patch_str: str, path_for_
 
             # 4. Search entire file if still not found
             if found_idx is None:
-                exact_hits = [i for i in range(len(file_lines) - len(old_hunk_lines) + 1)
-                              if _matches(i, fuzzy=False)]
+                exact_hits = [idx for idx in range(len(file_lines) - len(old_hunk_lines) + 1)
+                              if _matches(idx, fuzzy=False)]
                 if len(exact_hits) == 1:
                     found_idx = exact_hits[0]
                 elif not exact_hits:
-                    fuzzy_hits = [i for i in range(len(file_lines) - len(old_hunk_lines) + 1)
-                                  if _matches(i, fuzzy=True)]
+                    fuzzy_hits = [idx for idx in range(len(file_lines) - len(old_hunk_lines) + 1)
+                                  if _matches(idx, fuzzy=True)]
                     if len(fuzzy_hits) == 1:
                         found_idx = fuzzy_hits[0]
 
@@ -558,16 +709,21 @@ def apply_unified_patch_with_count(original_text: str, patch_str: str, path_for_
 
         file_lines[found_idx: found_idx + len(old_hunk_lines)] = new_hunk_lines
         line_offset = found_idx + len(new_hunk_lines) - (hunk.old_start - 1 + len(old_hunk_lines))
+        applied_count += 1
 
     nl = "\r\n" if is_crlf else "\n"
     new_text = nl.join(file_lines)
     if has_trailing_newline and file_lines:
         new_text += nl
-    return new_text, len(hunks)
+    return new_text, applied_count
+
+
+def apply_unified_patch_with_count(original_text: str, patch_str: str, path_for_err: str = "") -> Tuple[str, int]:
+    return apply_selected_hunks(original_text, patch_str, selected_hunk_indices=None, path_for_err=path_for_err)
 
 
 def apply_unified_patch(original_text: str, patch_str: str, path_for_err: str = "") -> str:
-    updated, _ = apply_unified_patch_with_count(original_text, patch_str, path_for_err=path_for_err)
+    updated, _ = apply_selected_hunks(original_text, patch_str, selected_hunk_indices=None, path_for_err=path_for_err)
     return updated
 
 
@@ -583,13 +739,19 @@ class ApplyPatch(Tool):
         "properties": {
             "path": {"type": "string", "description": "File path relative to the workspace root"},
             "patch": {"type": "string", "description": "Unified diff patch content including hunk headers"},
+            "selected_hunks": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "description": "Optional list of 0-based hunk indices to selectively apply. Omit to apply all hunks.",
+            },
+            "skip_syntax_check": {"type": "boolean", "description": "Skip pre-commit syntax check (default false)"},
         },
         "required": ["path", "patch"],
     }
     kind = "edit"
 
     def _apply(self, args, ctx):
-        p = ctx.resolve(args["path"])
+        p = ctx.resolve(args["path"], write=True)
         ctx.check_secret(p)
         if p.is_dir():
             raise ToolError(f"'{args['path']}' is a directory")
@@ -599,7 +761,8 @@ class ApplyPatch(Tool):
         patch = args.get("patch", "")
         if not patch or not patch.strip():
             raise ToolError("patch is empty")
-        updated, hunk_count = apply_unified_patch_with_count(text, patch, path_for_err=ctx.rel(p))
+        selected = args.get("selected_hunks")
+        updated, hunk_count = apply_selected_hunks(text, patch, selected_hunk_indices=selected, path_for_err=ctx.rel(p))
         return p, text, updated, hunk_count
 
     def precheck(self, args, ctx):
@@ -608,16 +771,26 @@ class ApplyPatch(Tool):
 
     def preview(self, args, ctx):
         try:
-            p, text, updated, _ = self._apply(args, ctx)
+            p, text, updated, count = self._apply(args, ctx)
         except ToolError as e:
             return f"(patch will fail: {e})"
-        return unified_diff(text, updated, ctx.rel(p))
+        diff = unified_diff(text, updated, ctx.rel(p))
+        if args.get("selected_hunks") is not None:
+            return f"# Staged {count} selected hunk(s)\n" + diff
+        return diff
 
     def run(self, args, ctx):
         p, text, updated, count = self._apply(args, ctx)
         _require_fresh_read(p, ctx, "patch")
         if text == updated:
-            return f"No changes applied to {ctx.rel(p)} (patch resulted in identical content)"
+            return f"No changes applied to {ctx.rel(p)} (no hunks selected or patch resulted in identical content)"
+        if not args.get("skip_syntax_check"):
+            err = validate_code_syntax(p, updated)
+            if err:
+                orig_err = validate_code_syntax(p, text)
+                if not orig_err:
+                    raise ToolError(f"Pre-commit syntax validation failed for {ctx.rel(p)}: {err}. "
+                                    "Patch was rejected to prevent corrupting the file.")
         ctx.snapshot(p)
         _write_text(p, updated)
         ctx.read_mtimes[str(p)] = p.stat().st_mtime
@@ -628,11 +801,20 @@ class Shell(Tool):
     name = "shell"
     description = ("Run a shell command in the workspace root and return stdout, stderr and exit code. "
                    "Use it for builds, tests, git and package managers. Commands are non-interactive "
-                   "(stdin is closed) and time out. Do not use it to read or edit files; use the file tools.")
+                   "(stdin is closed) and time out. Do not use it to read or edit files; use the file tools. "
+                   "Set is_background=True for servers, watchers, and ongoing processes.")
     parameters = {"type": "object", "properties": {
         "command": {"type": "string", "description": "Command to run"},
         "timeout": {"type": "integer", "description": "Timeout in seconds (default 120, max 600)"},
         "description": {"type": "string", "description": "5-10 word summary of what the command does"},
+        "is_background": {
+            "type": "boolean",
+            "description": "Run command asynchronously in the background. Use for long-running servers, test watchers, or tasks that need ongoing monitoring or stdin interaction."
+        },
+        "wait_ms": {
+            "type": "integer",
+            "description": "Milliseconds to wait after starting the background process before returning initial output (default 1000)."
+        },
         "unsandboxed": {"type": "boolean",
                         "description": "Run outside the command sandbox (the user is asked first). Only when the "
                                        "command must write outside the workspace, or failed because the sandbox "
@@ -643,9 +825,10 @@ class Shell(Tool):
     def preview(self, args, ctx):
         from hubble.sandbox import effective_mode
         cmd = args.get("command", "")
+        suffix = "\n(background task: managed via manage_task)" if args.get("is_background") else ""
         if args.get("unsandboxed") and effective_mode(ctx.sandbox) != "off":
-            return f"{cmd}\n(outside the sandbox: full access to this machine)"
-        return cmd
+            return f"{cmd}{suffix}\n(outside the sandbox: full access to this machine)"
+        return f"{cmd}{suffix}" if suffix else cmd
 
     def run(self, args, ctx):
         from hubble.sandbox import effective_mode
@@ -654,15 +837,70 @@ class Shell(Tool):
         if args.get("unsandboxed") and not ctx.allow_unsandboxed:
             raise ToolError("Running outside the sandbox is disabled here. Run the command inside the "
                             "sandbox, or do the work without it.")
+        is_bg = bool(args.get("is_background"))
+        wait_ms = int(args.get("wait_ms") or 1000)
         mode = "off" if args.get("unsandboxed") else effective_mode(ctx.sandbox)
+        if is_bg:
+            if mode == "docker":
+                raise ToolError("Background tasks are not currently supported inside Docker sandbox mode.")
+            return self._run_background(cmd, wait_ms, ctx, native=mode == "native")
         if mode == "docker":
             return self._run_docker(cmd, timeout, ctx)
         return self._run_host(cmd, timeout, ctx, native=mode == "native")
 
+    def _run_background(self, cmd: str, wait_ms: int, ctx: ToolContext, native: bool = False) -> str:
+        argv = list(ctx.shell_argv)
+        if "powershell" in argv[0].lower() or "pwsh" in argv[0].lower():
+            stripped = cmd.strip()
+            if (stripped.startswith(('"', "'")) and not stripped.startswith("&")
+                    and (" " in stripped or "\t" in stripped)):
+                cmd = "& " + stripped
+            cmd = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; $OutputEncoding=[System.Text.Encoding]::UTF8; " + cmd
+        if native:
+            from hubble.sandbox import SandboxUnavailable, wrap
+            try:
+                full = wrap(argv, cmd, ctx.root, [*ctx.extra_dirs, *ctx.sandbox_writable], ctx.sandbox_network)
+            except SandboxUnavailable as e:
+                raise ToolError(f"shell_sandbox is 'native' but no sandbox is available: {e}. "
+                                "Set shell_sandbox to \"auto\" or \"off\".")
+            argv, cmd = full[:-1], full[-1]
+        env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
+        win_job = None
+        if sys.platform == "win32":
+            from hubble.sandbox import WindowsJobSandbox, parse_memory_limit_bytes
+            mem_bytes = parse_memory_limit_bytes(ctx.sandbox_memory)
+            win_job = WindowsJobSandbox(memory_limit_bytes=mem_bytes)
+
+        task = ctx.process_manager.start_task(
+            command=cmd,
+            argv=argv + [cmd],
+            cwd=ctx.root,
+            env=env,
+            wait_ms=wait_ms,
+            win_job=win_job,
+        )
+
+        status_info = ctx.process_manager.get_status(task.task_id, tail_lines=20)
+        recent_out = status_info.get("recent_output", "").strip()
+        lines = [
+            f"Background task started: {task.task_id} (PID {task.proc.pid})",
+            f"Command: {cmd}",
+            f"Status: {task.status}",
+            f"Log file: {task.log_file}",
+        ]
+        if recent_out:
+            lines.append("\nInitial output:\n" + recent_out)
+        lines.append(f"\nUse manage_task(action='status', task_id='{task.task_id}') to check output or manage_task(action='kill', task_id='{task.task_id}') to stop.")
+        return "\n".join(lines)
+
     def _run_host(self, cmd: str, timeout: int, ctx: ToolContext, native: bool = False) -> str:
         argv = list(ctx.shell_argv)
         if "powershell" in argv[0].lower() or "pwsh" in argv[0].lower():
-            cmd = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; " + cmd
+            stripped = cmd.strip()
+            if (stripped.startswith(('"', "'")) and not stripped.startswith("&")
+                    and (" " in stripped or "\t" in stripped)):
+                cmd = "& " + stripped
+            cmd = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; $OutputEncoding=[System.Text.Encoding]::UTF8; " + cmd
         if native:
             from hubble.sandbox import SandboxUnavailable, wrap
             try:
@@ -676,23 +914,40 @@ class Shell(Tool):
         # (dev servers, watchers) keep the pipes open and the CLI hangs.
         group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == "win32"
                  else {"start_new_session": True})
+        win_job = None
+        if sys.platform == "win32":
+            from hubble.sandbox import WindowsJobSandbox, parse_memory_limit_bytes
+            mem_bytes = parse_memory_limit_bytes(ctx.sandbox_memory)
+            win_job = WindowsJobSandbox(memory_limit_bytes=mem_bytes)
+
         try:
             proc = subprocess.Popen(argv + [cmd], cwd=ctx.root, stdin=subprocess.DEVNULL,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                     encoding="utf-8", errors="replace", env=env, **group)
+            if win_job:
+                win_job.assign_process(proc)
         except OSError as e:
+            if win_job:
+                win_job.close()
             raise ToolError(f"Could not start shell: {e}")
         try:
             stdout, stderr = communicate_interruptibly(proc, timeout)
         except subprocess.TimeoutExpired:
             _kill_tree(proc)
+            if win_job:
+                win_job.close()
             stdout, stderr = _drain(proc)
             raise ToolError(f"Command timed out after {timeout}s (process tree killed). "
                             "Long-running servers are not supported.\n" + truncate(stdout or "", 5000))
         except KeyboardInterrupt:
             _kill_tree(proc)
+            if win_job:
+                win_job.close()
             _drain(proc)
             raise
+        finally:
+            if win_job:
+                win_job.close()
         result = _format_result(stdout, stderr, proc.returncode)
         if native and proc.returncode != 0:
             from hubble.sandbox import looks_blocked
@@ -747,6 +1002,152 @@ class Shell(Tool):
             subprocess.run([docker, "kill", name], capture_output=True, stdin=subprocess.DEVNULL, timeout=10)
         except (OSError, subprocess.TimeoutExpired):
             pass
+
+
+class ManageTask(Tool):
+    name = "manage_task"
+    description = (
+        "Manage background tasks and processes started with shell(is_background=True). "
+        "Actions: 'list' (list running/recent background tasks), "
+        "'status' (check task status, exit code, and recent output log), "
+        "'send_input' (send input text to a running task's stdin), "
+        "'kill' (terminate a running task and its process tree)."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["list", "status", "send_input", "kill"],
+                "description": "Action to perform on background tasks",
+            },
+            "task_id": {
+                "type": "string",
+                "description": "The task ID (e.g. 'task-1'). Required for 'status', 'send_input', 'kill'.",
+            },
+            "input": {
+                "type": "string",
+                "description": "Input text to send to the process's standard input. Required for 'send_input'.",
+            },
+            "tail_lines": {
+                "type": "integer",
+                "description": "Number of recent log lines to retrieve (default 50). Optional for 'status'.",
+            },
+        },
+        "required": ["action"],
+    }
+    kind = "exec"
+
+    def target(self, args: Dict[str, Any]) -> str:
+        return f"{args.get('action', '')} {args.get('task_id', '')}".strip()
+
+    def preview(self, args: Dict[str, Any], ctx: ToolContext) -> str:
+        act = args.get("action", "")
+        tid = args.get("task_id", "")
+        if act == "kill":
+            return f"Kill background task {tid}"
+        if act == "send_input":
+            return f"Send input to background task {tid}: {args.get('input', '')[:40]}"
+        return f"Manage task {act} {tid}".strip()
+
+    def run(self, args: Dict[str, Any], ctx: ToolContext) -> str:
+        action = str(args.get("action", "")).lower().strip()
+        pm = ctx.process_manager
+
+        if action == "list":
+            tasks = pm.list_tasks()
+            if not tasks:
+                return "No background tasks currently recorded."
+            lines = [f"Background tasks ({len(tasks)}):"]
+            for t in tasks:
+                rt = f"{t['runtime_seconds']}s" if t["runtime_seconds"] is not None else "-"
+                ec = f"exit {t['exit_code']}" if t["exit_code"] is not None else "-"
+                lines.append(f"  • {t['task_id']}: [{t['status']}] PID {t['pid']} (runtime: {rt}, {ec}) - {t['command'][:80]}")
+            return "\n".join(lines)
+
+        task_id = args.get("task_id", "").strip()
+        if not task_id:
+            raise ToolError(f"task_id is required for action '{action}'")
+
+        if action == "status":
+            tail_lines = max(1, min(int(args.get("tail_lines") or 50), 500))
+            try:
+                info = pm.get_status(task_id, tail_lines=tail_lines)
+            except KeyError as e:
+                raise ToolError(str(e))
+            lines = [
+                f"Task ID: {info['task_id']}",
+                f"PID: {info['pid']}",
+                f"Status: {info['status']}",
+                f"Exit Code: {info['exit_code'] if info['exit_code'] is not None else 'running'}",
+                f"Log File: {info['log_file']}",
+            ]
+            if info["recent_output"]:
+                lines.append(f"\nRecent Output (last {tail_lines} lines):\n{info['recent_output']}")
+            else:
+                lines.append("\nRecent Output: (empty)")
+            return "\n".join(lines)
+
+        if action == "send_input":
+            text = args.get("input")
+            if text is None:
+                raise ToolError("input is required for send_input")
+            try:
+                res = pm.send_input(task_id, text)
+                return res
+            except (KeyError, RuntimeError) as e:
+                raise ToolError(str(e))
+
+        if action == "kill":
+            try:
+                res = pm.kill_task(task_id)
+                return res
+            except (KeyError, RuntimeError) as e:
+                raise ToolError(str(e))
+
+        raise ToolError(f"Unknown action: '{action}'. Must be one of: list, status, send_input, kill.")
+
+
+class SendMessage(Tool):
+    name = "send_message"
+    description = (
+        "Send a message to another agent or subagent (e.g. 'parent', a subagent role like "
+        "'code-reviewer', 'research', a task ID like 'task-1', or 'broadcast' to all active agents). "
+        "Enables reactive inter-agent coordination without blocking or busy-polling."
+    )
+    kind = "read"
+    parameters = {
+        "type": "object",
+        "properties": {
+            "recipient": {
+                "type": "string",
+                "description": "Recipient agent ID (e.g. 'parent', subagent name/task ID, or 'broadcast')",
+            },
+            "message": {
+                "type": "string",
+                "description": "The message content to communicate with the recipient",
+            },
+        },
+        "required": ["recipient", "message"],
+    }
+
+    def target(self, args: Dict[str, Any]) -> str:
+        return args.get("recipient", "")
+
+    def run(self, args: Dict[str, Any], ctx: ToolContext) -> str:
+        recipient = str(args.get("recipient", "")).strip()
+        message = str(args.get("message", "")).strip()
+        if not recipient:
+            raise ToolError("recipient is required")
+        if not message:
+            raise ToolError("message cannot be empty")
+
+        bus = getattr(ctx, "message_bus", None) or default_message_bus
+        sender = getattr(ctx, "agent_id", "main")
+        msg = bus.send(sender=sender, recipient=recipient, content=message)
+        return f"Message delivered to '{recipient}' (id: {msg.id})."
+
+
 
 
 def _format_result(stdout: str, stderr: str, returncode: int) -> str:
@@ -1063,10 +1464,10 @@ class SymbolsTool(Tool):
 
 
 def default_tools() -> List[Tool]:
-    return [ReadFile(), WriteFile(), EditFile(), ApplyPatch(), Shell(), Grep(), Glob(), ListDir(), SymbolsTool(), TodoWrite()]
+    return [ReadFile(), WriteFile(), EditFile(), ApplyPatch(), Shell(), ManageTask(), SendMessage(), Grep(), Glob(), ListDir(), SymbolsTool(), TodoWrite()]
 
 
-READ_ONLY_TOOL_NAMES = {"read_file", "grep", "glob", "list_dir", "symbols"}
+READ_ONLY_TOOL_NAMES = {"read_file", "grep", "glob", "list_dir", "symbols", "send_message"}
 
 
 def run_tool(tool: Tool, args: Dict[str, Any], ctx: ToolContext) -> tuple:

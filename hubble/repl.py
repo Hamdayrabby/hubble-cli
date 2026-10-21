@@ -1,13 +1,15 @@
 """Interactive REPL: prompt_toolkit input, slash commands, @file mentions, # memory notes."""
 
 import os
+import queue
 import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
@@ -43,6 +45,40 @@ class Command:
         self.name, self.fn, self.help, self.aliases, self.args = name, fn, help, aliases, args
 
 
+def _is_subsequence(query: str, target: str) -> bool:
+    it = iter(target.lower())
+    return all(c in it for c in query.lower())
+
+
+def _segmented_gauge(ratio: float, blocks: int = 6) -> str:
+    ratio = max(0.0, min(1.0, ratio))
+    filled = int(round(ratio * blocks))
+    return "█" * filled + "░" * (blocks - filled)
+
+
+def _estimate_session_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+    m = model.lower()
+    if "claude-3-5-sonnet" in m or "claude-3-7-sonnet" in m:
+        p_rate, c_rate = 3.0, 15.0
+    elif "claude-3-opus" in m:
+        p_rate, c_rate = 15.0, 75.0
+    elif "claude-3-5-haiku" in m:
+        p_rate, c_rate = 0.80, 4.0
+    elif "gpt-4o-mini" in m:
+        p_rate, c_rate = 0.15, 0.60
+    elif "gpt-4o" in m:
+        p_rate, c_rate = 2.50, 10.0
+    elif "gemini-2" in m or "gemini-1.5-flash" in m:
+        p_rate, c_rate = 0.10, 0.40
+    elif "gemini-1.5-pro" in m:
+        p_rate, c_rate = 1.25, 5.0
+    elif "deepseek" in m or "qwen" in m or "codestral" in m:
+        p_rate, c_rate = 0.25, 1.00
+    else:
+        p_rate, c_rate = 1.0, 3.0
+    return (prompt_tokens * p_rate + completion_tokens * c_rate) / 1_000_000.0
+
+
 class ReplCompleter(Completer):
     def __init__(self, repl: "Repl"):
         self.repl = repl
@@ -58,6 +94,78 @@ class ReplCompleter(Completer):
                     mark = " (current)" if value == current else ""
                     yield Completion(label, start_position=-len(m.group(1)), display_meta=meta.strip() + mark)
             return
+
+        # Subcommand autocompletions for /route, /provider, /mode, /theme, /worktree, /thinking, /multiline, /team
+        m_cmd = re.match(r"^/(\w[\w-]*)\s+(\S*)$", text)
+        if m_cmd:
+            cname = m_cmd.group(1).lower()
+            arg_typed = m_cmd.group(2).lower()
+            pos = -len(m_cmd.group(2))
+            if cname in ("route", "routing"):
+                opts = [("fast ", "Set fast model for simple queries"),
+                        ("strong ", "Set strong model for hard queries"),
+                        ("auto", "Enable smart query routing"),
+                        ("on", "Enable smart query routing"),
+                        ("off", "Disable smart query routing")]
+                for opt, desc in opts:
+                    if arg_typed in opt.lower():
+                        yield Completion(opt, start_position=pos, display_meta=desc)
+                return
+            if cname in ("provider", "providers"):
+                opts = [("list", "List configured providers"),
+                        ("add ", "Add a new model provider"),
+                        ("remove ", "Remove a provider"),
+                        ("secure", "Encrypt stored provider API keys")]
+                for opt, desc in opts:
+                    if arg_typed in opt.lower():
+                        yield Completion(opt, start_position=pos, display_meta=desc)
+                return
+            if cname in ("mode", "permissions"):
+                from hubble.permissions import MODES
+                for mode_name in MODES:
+                    if arg_typed in mode_name.lower():
+                        yield Completion(mode_name, start_position=pos, display_meta="Permission tier")
+                return
+            if cname in ("theme", "color", "colors"):
+                from hubble.theme import COLOR_SCHEMES
+                for th_name, th_obj in COLOR_SCHEMES.items():
+                    if arg_typed in th_name.lower():
+                        yield Completion(th_name, start_position=pos, display_meta=th_obj.description)
+                return
+            if cname in ("worktree", "worktrees", "wt"):
+                opts = [("new ", "Create new isolated git worktree"),
+                        ("switch ", "Switch to an existing worktree"),
+                        ("exit", "Return to primary root workspace"),
+                        ("list", "List active worktrees"),
+                        ("remove ", "Clean up a worktree branch")]
+                for opt, desc in opts:
+                    if arg_typed in opt.lower():
+                        yield Completion(opt, start_position=pos, display_meta=desc)
+                return
+            if cname == "thinking":
+                opts = [("view", "Inspect reasoning / chain of thought from last turn"),
+                        ("on", "Show live thinking preview accordion"),
+                        ("off", "Hide live thinking preview")]
+                for opt, desc in opts:
+                    if arg_typed in opt.lower():
+                        yield Completion(opt, start_position=pos, display_meta=desc)
+                return
+            if cname == "multiline":
+                opts = [("on", "Enter adds newline, Esc+Enter submits"),
+                        ("off", "Enter submits, Shift+Enter adds newline")]
+                for opt, desc in opts:
+                    if arg_typed in opt.lower():
+                        yield Completion(opt, start_position=pos, display_meta=desc)
+                return
+            if cname == "team":
+                opts = [("add ", "Add model to subagent pool"),
+                        ("remove ", "Remove model by index"),
+                        ("clear", "Reset subagent pool to default")]
+                for opt, desc in opts:
+                    if arg_typed in opt.lower():
+                        yield Completion(opt, start_position=pos, display_meta=desc)
+                return
+
         if text.startswith("/") and " " not in text:
             typed = text[1:].lower()
             for cmd in self.repl.commands.values():
@@ -69,19 +177,60 @@ class ReplCompleter(Completer):
                 yield Completion("/" + (cmd.name if hit == cmd.name or not typed else hit),
                                  start_position=-len(text), display=shown, display_meta=cmd.help)
             return
+
         m = re.search(r"@([\w./\\-]*)$", text)
         if m:
             partial = m.group(1).replace("\\", "/")
-            base_dir = self.repl.agent.ctx.root / os.path.dirname(partial)
-            prefix = os.path.basename(partial)
-            try:
-                entries = sorted(base_dir.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower()))
-            except OSError:
-                return
-            for e in entries[:200]:
-                if e.name.startswith(prefix) and e.name not in (".git", "__pycache__", "node_modules"):
-                    rel = (Path(os.path.dirname(partial)) / e.name).as_posix().removeprefix("./")
-                    yield Completion(rel + ("/" if e.is_dir() else ""), start_position=-len(partial))
+            pos = -len(m.group(1))
+
+            # Semantic pseudo-file completions:
+            semantic = [
+                ("git", "Git status, branch, and staged file list"),
+                ("diff", "Current uncommitted working directory git diff"),
+                ("todos", "Active project task list and todos"),
+                ("problems", "Recent errors and diagnostics"),
+            ]
+            for tag, meta in semantic:
+                if not partial or _is_subsequence(partial, tag):
+                    yield Completion(tag, start_position=pos, display=f"@{tag}", display_meta=meta)
+
+            # Filesystem completions (fuzzy subsequence):
+            root = self.repl.agent.ctx.root
+            if "/" in partial:
+                base_dir = root / os.path.dirname(partial)
+                prefix = os.path.basename(partial)
+                try:
+                    entries = sorted(base_dir.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower()))
+                except OSError:
+                    return
+                for e in entries[:200]:
+                    if e.name.startswith(prefix) and e.name not in (".git", "__pycache__", "node_modules", ".venv", "venv"):
+                        rel = (Path(os.path.dirname(partial)) / e.name).as_posix().removeprefix("./")
+                        yield Completion(rel + ("/" if e.is_dir() else ""), start_position=pos)
+            else:
+                try:
+                    candidates = []
+                    for e in sorted(root.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
+                        if e.name in (".git", "__pycache__", "node_modules", ".venv", "venv"):
+                            continue
+                        candidates.append(e)
+                        if e.is_dir() and e.name in ("tests", "hubble", "src", "docs"):
+                            try:
+                                for sub in sorted(e.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
+                                    if sub.name not in (".git", "__pycache__"):
+                                        candidates.append(sub)
+                            except OSError:
+                                pass
+                    for cand in candidates[:300]:
+                        rel = cand.relative_to(root).as_posix()
+                        if not partial or _is_subsequence(partial, rel):
+                            is_dir = cand.is_dir()
+                            yield Completion(rel + ("/" if is_dir else ""), start_position=pos,
+                                             display=f"{cand.name}{'/' if is_dir else ''}",
+                                             display_meta=rel if rel != cand.name else "")
+                except OSError:
+                    pass
+            return
 
 
 class Repl:
@@ -103,6 +252,13 @@ class Repl:
         self._update_scheduled = False
         self._last_ctrl_c = 0.0
         self.turn_stats = None
+        self.message_queue: List[str] = []
+        self.is_busy: bool = False
+        self._worker_thread: Optional[threading.Thread] = None
+        self._task_queue: queue.Queue = queue.Queue()
+        self._shutdown_event = threading.Event()
+        self._APPROVAL_SENTINEL = object()
+        self._pending_approval = None
         self.agent = agent
         agent.fallback_resolver = self.fallback_for
         self.store = store
@@ -165,7 +321,8 @@ class Repl:
         r("temp", self.cmd_temp, "Show or set temperature", args="[0-2]")
         r("fallback", self.cmd_fallback, "Choose the model used when the current one is rate limited",
           args="[model|auto|off]")
-        r("thinking", self.cmd_thinking, "Show or hide the model's reasoning text", args="[on|off]")
+        r("thinking", self.cmd_thinking, "Show, hide or view the model's reasoning text", args="[on|off|view]")
+        r("multiline", self.cmd_multiline, "Toggle multiline input mode (Enter newlines vs submits)", args="[on|off]")
         r("sandbox", self.cmd_sandbox, "Sandbox shell commands: OS sandbox (macOS/Linux), Docker, or off",
           args="[auto|native|docker|off]")
         r("mcp", self.cmd_mcp, "List MCP servers; log in to or out of a remote one", args="[login|logout <server>]")
@@ -178,11 +335,14 @@ class Repl:
           ("github",), "[--force]")
         r("worktree", self.cmd_worktree, "Work in an isolated git worktree (new, switch, exit, remove, list)",
           ("worktrees", "wt"), "[new|switch|exit|remove <name>]")
-        r("agents", self.cmd_agents, "List custom sub-agents, or create one", ("agent",), "[new <name> [user]]")
+        r("agent", self.cmd_agents, "List specialist agents, or create/fork one", ("agents",),
+          "[new|create|add|fork <name>]")
         r("plugin", self.cmd_plugin, "List, install, remove, enable or disable plugins", ("plugins",),
           "[list|install <src>|remove <name>]")
         r("subagent", self.cmd_subagent, "Control sub-agent policy: auto, explicit, or off", ("subagents",),
           "[auto|explicit|off]")
+        r("queue", self.cmd_queue, "List pending queued user prompts")
+        r("clear-queue", self.cmd_clear_queue, "Clear all pending queued user prompts", ("cq",))
 
     def _load_custom_commands(self):
         """Skills become /<name>; a skill's own description is shown in /help and /<tab>."""
@@ -225,9 +385,21 @@ class Repl:
     def _prompt_session(self) -> PromptSession:
         kb = KeyBindings()
 
+        try:
+            from prompt_toolkit.input.vt100_parser import ANSI_SEQUENCES
+            from prompt_toolkit.keys import Keys
+            ANSI_SEQUENCES["\x1b[13;2u"] = Keys.ControlJ
+            ANSI_SEQUENCES["\x1b[27;2;13~"] = Keys.ControlJ
+        except Exception:
+            pass
+
         @kb.add("escape", "enter")
         def _(event):
-            event.current_buffer.insert_text("\n")
+            buf = event.current_buffer
+            if getattr(self, "multiline_mode", False):
+                buf.validate_and_handle()
+            else:
+                buf.insert_text("\n")
 
         @kb.add("escape", "v")  # Alt+V; terminals keep Ctrl+V for their own text paste
         def _(event):
@@ -265,13 +437,27 @@ class Repl:
             buf.apply_completion(buf.complete_state.current_completion)
             buf.validate_and_handle()
 
+        @kb.add("enter", filter=~completion_is_selected)
+        def _(event):
+            buf = event.current_buffer
+            text = buf.text
+            # Auto-multiline detection for unclosed codeblocks
+            if text.count("```") % 2 != 0:
+                buf.insert_text("\n")
+                return
+            if getattr(self, "multiline_mode", False):
+                buf.insert_text("\n")
+                return
+            buf.validate_and_handle()
+
         HOME_DIR.mkdir(parents=True, exist_ok=True)
         from prompt_toolkit.styles import Style
         from hubble.theme import get_prompt_style
         theme_name = self.agent.settings.get("theme", "terminal")
         self.session = PromptSession(history=FileHistory(str(HOME_DIR / "history")), completer=ReplCompleter(self),
                                      complete_while_typing=True, key_bindings=kb, bottom_toolbar=self._toolbar,
-                                     multiline=False, enable_history_search=False, refresh_interval=1.0,
+                                     multiline=False, enable_history_search=False,
+                                     refresh_interval=0.1 if getattr(self, "is_busy", False) else 1.0,
                                      reserve_space_for_menu=14, style=Style.from_dict(get_prompt_style(theme_name)))
         return self.session
 
@@ -281,17 +467,40 @@ class Repl:
         a = self.agent
         mode = a.permissions.mode
         ratio = a.context_ratio()
+        gauge = _segmented_gauge(ratio, blocks=6)
         ctx_cls = "tb.warn" if ratio >= 0.8 else "tb.val"
         prov = f"<tb.dim>{escape_html(a.provider_name)} </tb.dim>" if len(self.providers) > 1 else ""
-        parts = [f"{prov}<tb.model>{escape_html(a.model)}</tb.model>",
-                 f"<tb.mode-{mode}>{mode}</tb.mode-{mode}> <tb.dim>shift+tab</tb.dim>",
-                 f"<tb.dim>persona</tb.dim> <tb.val>{a.persona}</tb.val>",
-                 f"<tb.dim>context</tb.dim> <{ctx_cls}>{ratio:.0%}</{ctx_cls}>"]
+        s = self.agent.last_stats if getattr(self, "is_busy", False) and self.agent.last_stats.model_calls else self.turn_stats
+        session_total = a.total_prompt_tokens + a.total_completion_tokens
+        prompt_tokens = s.prompt_tokens if s else 0
+        completion_tokens = s.completion_tokens if s else 0
+        speed = (s.completion_tokens / s.duration) if (s and s.duration) else 0.0
+
+        def short(n: int) -> str:
+            return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.1f}k" if n >= 1e4 else f"{n:,}"
+
+        parts = [
+            f"<tb.model>● {prov}{escape_html(a.model)}</tb.model>",
+            f"<tb.mode-{mode}>[{mode}]</tb.mode-{mode}>",
+            f"<{ctx_cls}>context [{gauge}] {ratio:.0%}</{ctx_cls}>",
+            f"<tb.in>↑ {short(prompt_tokens)}</tb.in> <tb.dim>in</tb.dim>",
+            f"<tb.out>↓ {short(completion_tokens)}</tb.out> <tb.dim>out</tb.dim>",
+            f"<tb.dim>session</tb.dim> <tb.val>{short(session_total)}</tb.val>",
+            f"<tb.speed>{speed:.1f}</tb.speed> <tb.dim>tok/s</tb.dim>",
+        ]
+        if getattr(self, "message_queue", None):
+            parts.append(f"<tb.warn>[{len(self.message_queue)} queued]</tb.warn>")
+        elif getattr(self, "is_busy", False):
+            parts.append("<tb.dim>[working...]</tb.dim>")
+        if s and s.tool_calls:
+            parts.append(f"<tb.val>{s.tool_calls}</tb.val> <tb.dim>tool call{'s' if s.tool_calls != 1 else ''}</tb.dim>")
         if a.pinned:
             parts.append(f"<tb.val>{len(a.pinned)}</tb.val> <tb.dim>pinned</tb.dim>")
-        for n, s in self.scanners.items():
-            if s.running:
-                parts.append(f"<tb.dim>checking {escape_html(n)}</tb.dim> <tb.val>{s.progress()}</tb.val>")
+        if getattr(self, "multiline_mode", False):
+            parts.append("<tb.val>multiline</tb.val>")
+        for n, s_scan in self.scanners.items():
+            if s_scan.running:
+                parts.append(f"<tb.dim>checking {escape_html(n)}</tb.dim> <tb.val>{s_scan.progress()}</tb.val>")
         self._sync_scan_visuals()
         try:
             from prompt_toolkit.application import get_app
@@ -299,11 +508,9 @@ class Repl:
         except Exception:
             width = 80
         rule = f"<tb.rule>{'─' * max(0, width - 1)}</tb.rule>"
-        # Status items wrap whole onto the next line when they don't fit (never split mid-item);
-        # the token/speed stats always keep a line of their own.
         lines = self._pack(parts, width - 3)
-        self._toolbar_height = 2 + len(lines)  # rule + status lines + stats line
-        return HTML(rule + "".join("\n  " + line for line in lines) + "\n  " + self._stats_line())
+        self._toolbar_height = 1 + len(lines)  # rule + status lines
+        return HTML(rule + "".join("\n  " + line for line in lines))
 
     def _run_footer(self):
         """One dim status line pinned under the live display while the agent works."""
@@ -313,25 +520,35 @@ class Repl:
         mode = a.permissions.mode
         mode_style = {"accept-edits": "bold #5fd787", "plan": "bold #5fafff", "yolo": "bold #ff5f5f"}.get(mode, "#b8b8cc")
         ratio = a.context_ratio()
+        gauge = _segmented_gauge(ratio, blocks=6)
+        session_total = a.total_prompt_tokens + a.total_completion_tokens
+        speed = s.completion_tokens / s.duration if s.duration else 0.0
 
         def short(n: int) -> str:
             return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.1f}k" if n >= 1e4 else f"{n:,}"
 
         t = Text("  ")
         if len(self.providers) > 1:
+            t.append("● ", style="bold #00d7ff")
             t.append(f"{a.provider_name} ", style="#6c6c80")
-        t.append(a.model, style="bold #00d7ff")
+            t.append(a.model, style="bold #00d7ff")
+        else:
+            t.append(f"● {a.model}", style="bold #00d7ff")
         sep = ("  ·  ", "#44445a")
-        t.append(*sep).append(mode, style=mode_style)
-        t.append(*sep).append("context ", style="#6c6c80").append(
-            f"{ratio:.0%}", style="bold #ffaf00" if ratio >= 0.8 else "#b8b8cc")
+        t.append(*sep).append(f"[{mode}]", style=mode_style)
+        t.append(*sep).append(f"context [{gauge}] {ratio:.0%}", style="bold #ffaf00" if ratio >= 0.8 else "#b8b8cc")
         t.append(*sep).append(f"↑ {short(s.prompt_tokens)}", style="#87afd7").append(" ", style="")
         t.append(f"↓ {short(s.completion_tokens)}", style="#af87d7").append(" this turn", style="#6c6c80")
+        t.append(*sep).append("session ", style="#6c6c80").append(
+            short(session_total), style="#b8b8cc")
+        t.append(*sep).append(f"{speed:.1f}", style="#5fd7af").append(" tok/s", style="#6c6c80")
         if s.tool_calls:
             t.append(*sep).append(str(s.tool_calls), style="#b8b8cc").append(
                 f" tool call{'s' if s.tool_calls != 1 else ''}", style="#6c6c80")
-        t.append(*sep).append("session ", style="#6c6c80").append(
-            short(a.total_prompt_tokens + a.total_completion_tokens), style="#b8b8cc")
+        if getattr(self, "message_queue", None):
+            t.append(*sep).append(f"[{len(self.message_queue)} queued]", style="bold #ffaf00")
+        elif getattr(self, "is_busy", False):
+            t.append(*sep).append("[working...]", style="#6c6c80")
         return t
 
     @classmethod
@@ -437,7 +654,7 @@ class Repl:
             size = app.output.get_size()
             typed = app.current_buffer.text
         except Exception:
-            return HTML("<ansicyan><b>❯</b></ansicyan> ")
+            return HTML("<prompt><b>❯</b></prompt> ")
         # Leave room for the prompt line and the toolbar (3+ lines), plus the completion menu while typing / or @.
         toolbar = getattr(self, "_toolbar_height", 3)
         budget = size.rows - 2 - toolbar - (10 if typed[:1] in ("/", "@") or " @" in typed else 0)
@@ -452,9 +669,95 @@ class Repl:
         status, tips = self._home
         frags = compose_home_fragments(size.columns, max(budget, 3), elapsed, status, tips, __version__,
                                        logo_style=self.agent.settings.get("logo"))
-        frame = FormattedText(frags + [("bold fg:ansicyan", "❯"), ("", " ")])
+        frame = FormattedText(frags + [("class:prompt", "❯"), ("", " ")])
         self._home_frame = (fps_step, frame, budget, size.columns)
         return frame
+
+    def _prompt_message(self):
+        """Prompt message: shows active subagent or agent preloader when busy, then the prompt line."""
+        from prompt_toolkit.formatted_text import FormattedText
+
+        busy = getattr(self, "is_busy", False)
+        events = getattr(getattr(self, "agent", None), "events", None)
+        board = getattr(events, "board", None)
+        if board is not None and hasattr(board, "to_formatted_text"):
+            frags = board.to_formatted_text()
+            if frags:
+                return FormattedText(frags + [("", "\n"), ("class:prompt", "❯"), ("", " ")])
+
+        if busy:
+            from hubble.board import CLAUDE_GLYPHS, _fmt_tokens
+            from hubble import spinner
+            import shutil
+            frame = int(time.time() * 10)
+
+            active = getattr(spinner, "_ACTIVE_SHIMMER", None)
+            active_label = getattr(getattr(active, "shimmer", None), "label", None) if active and not getattr(active, "_stopped", False) else None
+            current_tool = getattr(events, "current_tool", None) or getattr(events, "current_activity", None)
+
+            # Multiple icon sets for dynamic morphing across pondering stages (Claude Code & Command Code style)
+            CLAUDE_ICON_SETS = [
+                ["✻", "✼", "✽", "✾", "✿", "❀", "❁", "❂"],             # Classic Claude blooming flower
+                ["✦", "✧", "✶", "✷", "✸", "✹", "✺", "✢"],             # Command Code starbursts & sparks
+                ["✿", "❀", "❁", "❂", "❁", "❀", "✿", "✾"],             # Botanical breathing bloom
+                ["✶", "✻", "✦", "❂", "✺", "✹", "✷", "✧"],             # Radiant star & sunburst
+                ["⌾", "◎", "◇", "◈", "◆", "✦", "✧", "❂"],             # Cosmic prisms & lens
+                ["✢", "✳", "∗", "✻", "✼", "✽", "✦", "✧"],             # Star cluster
+            ]
+
+            CLAUDE_VERBS = [
+                "Pondering", "Synthesizing", "Cogitating", "Contemplating", "Analyzing",
+                "Focusing the lens", "Connecting dots", "Percolating", "Aligning mirrors",
+                "Marinating", "Noodling", "Formulating response", "Caramelizing",
+                "Decoding signals", "Calculating trajectories", "Consulting the stars",
+                "Reviewing", "Evaluating", "Reflecting", "Drifting through code", "Thinking",
+            ]
+            sh_obj = getattr(active, "shimmer", None)
+            t_start = getattr(events, "turn_start_time", 0.0) or (getattr(sh_obj, "start", 0.0) if sh_obj else 0.0)
+            elapsed = max(0.0, time.time() - t_start) if t_start else 0.0
+
+            if active_label:
+                words = active_label + "…"
+                glyph = CLAUDE_GLYPHS[frame % len(CLAUDE_GLYPHS)]
+            elif current_tool and current_tool not in ("Thinking...", "Generating response...", "Processing results..."):
+                words = current_tool + "…"
+                glyph = CLAUDE_GLYPHS[frame % len(CLAUDE_GLYPHS)]
+            else:
+                verb_idx = int(elapsed / 2.8) % len(CLAUDE_VERBS)
+                words = CLAUDE_VERBS[verb_idx] + "…"
+                active_set = CLAUDE_ICON_SETS[verb_idx % len(CLAUDE_ICON_SETS)]
+                glyph = active_set[frame % len(active_set)]
+
+            cols = shutil.get_terminal_size((80, 24)).columns
+            tools = getattr(events, "tool_calls_this_turn", 0)
+            s = getattr(getattr(self, "agent", None), "last_stats", None)
+
+            # Shimmer wave over the icon and letters (Claude Code & Command Code style)
+            sweep = len(words) + 8
+            pos = (elapsed * 14) % sweep - 4
+            icon_d = abs(-1 - pos)
+            icon_style = "fg:#ffffff bold" if icon_d < 1.4 else "fg:#a5f3fc bold" if icon_d < 2.8 else "fg:#00d7ff bold"
+            frags = [(icon_style, f"{glyph} ")]
+            for i, ch in enumerate(words):
+                d = abs(i - pos)
+                style = "fg:#ffffff bold" if d < 1.2 else "fg:#a5f3fc bold" if d < 2.5 else "fg:#38bdf8"
+                frags.append((style, ch))
+
+            stats_parts = [f"{int(elapsed)}s"]
+            if s and (s.prompt_tokens or s.completion_tokens):
+                stats_parts.append(f"{_fmt_tokens(s.prompt_tokens + s.completion_tokens)} tok")
+            elif getattr(events, "reasoning_chars", 0):
+                r_tok = int(events.reasoning_chars / 3.8)
+                if r_tok:
+                    stats_parts.append(f"{_fmt_tokens(r_tok)} tok")
+            if tools:
+                stats_parts.append(f"{tools} tool{'s' if tools != 1 else ''}")
+            stats_parts.append("ctrl+c to interrupt")
+
+            frags.append(("fg:#6c6c80", f"  ({' · '.join(stats_parts)})"))
+            return FormattedText(frags + [("", "\n"), ("class:prompt", "❯"), ("", " ")])
+
+        return FormattedText([("class:prompt", "❯"), ("", " ")])
 
     def fallback_for(self, provider: str, model: str):
         choice = resolve_fallback(self.agent.settings, self.providers, provider, model)
@@ -546,48 +849,173 @@ class Repl:
                 # Silent: the bottom bar already shows progress, and only a failure is worth a line.
                 self.start_scan(name, "", quiet=True)
 
+    def _start_worker(self):
+        if self._worker_thread is None or not self._worker_thread.is_alive():
+            self._shutdown_event.clear()
+            self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
+            self._worker_thread.start()
+
+    def _worker_loop(self):
+        while not self._shutdown_event.is_set():
+            try:
+                task = self._task_queue.get(timeout=0.2)
+            except Exception:
+                continue
+            if task is None:
+                break
+            text = task
+            self.is_busy = True
+            if getattr(self, "session", None) is not None:
+                self.session.refresh_interval = 0.1
+                try:
+                    self.session.app.invalidate()
+                except Exception:
+                    pass
+            try:
+                self.send(text)
+            except Exception as e:
+                console.print(f"[red]Error: {escape(str(e))}[/red]")
+            finally:
+                while self.message_queue and not self._shutdown_event.is_set():
+                    next_text = self.message_queue.pop(0)
+                    from hubble.theme import get_palette
+                    from hubble.ui import ACTIVE_THEME
+                    pal = get_palette(ACTIVE_THEME)
+                    p_col = pal.user_prefix or "bold #00d7ff"
+                    u_col = pal.user_text or "#00d7ff"
+                    console.print(f"[{p_col}]❯[/{p_col}] [{u_col}]{escape(next_text)}[/{u_col}]")
+                    try:
+                        self.send(next_text)
+                    except Exception as e:
+                        console.print(f"[red]Error: {escape(str(e))}[/red]")
+                self.is_busy = False
+                if getattr(self, "session", None) is not None:
+                    self.session.refresh_interval = 1.0
+                    try:
+                        self.session.app.invalidate()
+                    except Exception:
+                        pass
+
+    def cmd_queue(self, arg: str = ""):
+        if self.message_queue:
+            console.print(f"[cyan]Queued prompts ({len(self.message_queue)}):[/cyan]")
+            for i, qm in enumerate(self.message_queue, 1):
+                console.print(f"  {i}. {escape(qm)}")
+        else:
+            console.print("[dim]No queued prompts.[/dim]")
+
+    def cmd_clear_queue(self, arg: str = ""):
+        count = len(self.message_queue)
+        self.message_queue.clear()
+        console.print(f"[yellow]Cleared {count} queued prompt(s).[/yellow]")
+
+    def _ask_approval_bridge(self, tool, args: Dict[str, Any], preview: Optional[str]) -> Tuple[str, str]:
+        session = getattr(self, "session", None)
+        app = getattr(session, "app", None) if session else None
+        if app is not None and getattr(app, "is_running", False) and getattr(app, "loop", None):
+            resp_queue = queue.Queue()
+            saved_draft = ""
+            try:
+                buf = getattr(app, "current_buffer", None)
+                if buf:
+                    saved_draft = buf.text
+            except Exception:
+                pass
+            self._pending_approval = (tool, args, preview, resp_queue, saved_draft)
+            try:
+                app.loop.call_soon_threadsafe(lambda: app.exit(result=self._APPROVAL_SENTINEL))
+            except Exception:
+                return self.agent.events._ask(tool, args, preview)
+            return resp_queue.get()
+        return self.agent.events._ask(tool, args, preview)
+
     def run(self, initial_prompt: Optional[str] = None):
         from hubble import spinner
-        spinner.FOOTER = self._run_footer  # status line under the spinner/board/stream while working
+        from prompt_toolkit.patch_stdout import patch_stdout
+        spinner.FOOTER = None  # Single bottom toolbar owned by prompt_toolkit (no duplicate middle bar)
         self._home = None
         self.agent.start_session("resume" if self.agent.messages else "startup")
+        self.agent.events.approval_bridge = self._ask_approval_bridge
         self.banner()
         self._refresh_stale_scans()
         self.updates.start()
+        self._start_worker()
         session = self._prompt_session()
         if initial_prompt:
             self._home = None
             self.handle(initial_prompt)
-        while True:
-            try:
-                self._announce_scans()
-                self._announce_update()
-                if self._home is not None:
-                    # Animated home screen lives in the prompt until the first message is sent;
-                    # the last frame stays in the scrollback.
-                    text = session.prompt(self._home_message, refresh_interval=1 / 60, reserve_space_for_menu=0)
-                    self._home = None
-                    # PromptSession.prompt() kwargs overwrite the session permanently, not just for
-                    # that one call -- without resetting these, every later prompt keeps 0 reserved
-                    # menu space (so "/" never shows a dropdown again) and a needlessly fast redraw.
-                    session.reserve_space_for_menu = 14
-                    session.refresh_interval = 1.0
-                else:
-                    text = session.prompt(HTML("<ansicyan><b>❯</b></ansicyan> "))
-            except KeyboardInterrupt:
-                now = time.time()
-                if now - self._last_ctrl_c < 2.0:
+        pending_default = ""
+        with patch_stdout(raw=True):
+            while not self._shutdown_event.is_set():
+                try:
+                    self._announce_scans()
+                    self._announce_update()
+                    if self._home is not None:
+                        # Animated home screen lives in the prompt until the first message is sent;
+                        # the last frame stays in the scrollback.
+                        text = session.prompt(self._home_message, refresh_interval=1 / 60, reserve_space_for_menu=0)
+                        self._home = None
+                        # PromptSession.prompt() kwargs overwrite the session permanently, not just for
+                        # that one call -- without resetting these, every later prompt keeps 0 reserved
+                        # menu space (so "/" never shows a dropdown again) and a needlessly fast redraw.
+                        session.reserve_space_for_menu = 14
+                        session.refresh_interval = 1.0
+                    else:
+                        text = session.prompt(self._prompt_message, default=pending_default)
+                        pending_default = ""
+                except KeyboardInterrupt:
+                    if self.is_busy:
+                        if self.message_queue:
+                            count = len(self.message_queue)
+                            self.message_queue.clear()
+                            console.print(f"[yellow]Cleared {count} queued message(s).[/yellow]")
+                        self.agent.interrupt()
+                        continue
+                    now = time.time()
+                    if now - self._last_ctrl_c < 2.0:
+                        break
+                    self._last_ctrl_c = now
+                    console.print("[dim]Press Ctrl+C again to exit (or type /exit).[/dim]")
+                    continue
+                except EOFError:
                     break
-                self._last_ctrl_c = now
-                console.print("[dim]Press Ctrl+C again to exit (or type /exit).[/dim]")
-                continue
-            except EOFError:
-                break
-            try:
-                if self.handle(text) is False:
-                    break
-            except KeyboardInterrupt:
-                console.print("[yellow]Interrupted.[/yellow]")
+                except Exception:
+                    time.sleep(0.05)
+                    try:
+                        session = self._prompt_session()
+                    except Exception:
+                        pass
+                    continue
+
+                if text is self._APPROVAL_SENTINEL:
+                    pending = getattr(self, "_pending_approval", None)
+                    self._pending_approval = None
+                    if pending:
+                        tool, args, preview, resp_queue, saved_draft = pending
+                        pending_default = saved_draft
+                        try:
+                            ans = self.agent.events._ask(tool, args, preview)
+                        except (KeyboardInterrupt, EOFError):
+                            ans = ("no", "Interrupted by user")
+                            if self.is_busy:
+                                self.agent.interrupt()
+                        except Exception as e:
+                            ans = ("no", str(e))
+                        resp_queue.put(ans)
+                    continue
+
+                try:
+                    if self.handle(text) is False:
+                        break
+                except KeyboardInterrupt:
+                    if self.is_busy:
+                        self.agent.interrupt()
+                    else:
+                        console.print("[yellow]Interrupted.[/yellow]")
+        self._shutdown_event.set()
+        if self._worker_thread and self._worker_thread.is_alive():
+            self._task_queue.put(None)
+            self._worker_thread.join(timeout=1.0)
         spinner.FOOTER = None
         self.agent.shutdown()
         console.print("[dim]Bye.[/dim]")
@@ -609,6 +1037,14 @@ class Repl:
                 console.print(f"[yellow]Unknown command /{escape(name)}. Try /help.[/yellow]")
                 return None
             return cmd.fn(arg.strip())
+        if self._worker_thread and self._worker_thread.is_alive():
+            if self.is_busy:
+                self.message_queue.append(text)
+                console.print(f"  [cyan]●[/cyan] [dim]Queued ({len(self.message_queue)} in queue):[/dim] [bold]{escape(text)}[/bold]")
+                return None
+            self._task_queue.put(text)
+            time.sleep(0.04)
+            return None
         self.send(text)
         return None
 
@@ -646,10 +1082,60 @@ class Repl:
         attachments = []
         for m in MENTION_RX.finditer(text):
             raw = m.group(1).rstrip(".,:;")
+            r_lower = raw.lower()
+
+            # 1. Semantic pseudo-mentions
+            if r_lower == "git":
+                try:
+                    res = subprocess.run(["git", "status", "--short", "--branch"], cwd=self.agent.ctx.root, capture_output=True, text=True, timeout=5)
+                    out = res.stdout.strip() or "(clean working tree)"
+                    attachments.append(f'<git-status>\n{out}\n</git-status>')
+                    console.print("[dim]  attached @git status[/dim]")
+                except Exception as e:
+                    console.print(f"[yellow]Failed to attach @git: {escape(str(e))}[/yellow]")
+                continue
+            if r_lower == "diff":
+                try:
+                    res = subprocess.run(["git", "diff", "HEAD"], cwd=self.agent.ctx.root, capture_output=True, text=True, timeout=5)
+                    out = res.stdout.strip() or "(no uncommitted diff)"
+                    attachments.append(f'<git-diff>\n{truncate(out, MAX_MENTION_CHARS)}\n</git-diff>')
+                    console.print(f"[dim]  attached @diff ({len(out.splitlines())} lines)[/dim]")
+                except Exception as e:
+                    console.print(f"[yellow]Failed to attach @diff: {escape(str(e))}[/yellow]")
+                continue
+            if r_lower == "todos":
+                if self.agent.ctx.todos:
+                    todos_str = "\n".join(f"- [{'x' if t.get('done') else ' '}] {t.get('task') or t.get('text', '')}" for t in self.agent.ctx.todos)
+                else:
+                    todos_str = "(no active todos)"
+                attachments.append(f'<todos>\n{todos_str}\n</todos>')
+                console.print(f"[dim]  attached @todos ({len(self.agent.ctx.todos)} items)[/dim]")
+                continue
+            if r_lower in ("problems", "diagnostics", "errors"):
+                problems_str = getattr(self.agent, "last_error", None) or "(no active errors or problems recorded)"
+                attachments.append(f'<problems>\n{problems_str}\n</problems>')
+                console.print("[dim]  attached @problems[/dim]")
+                continue
+
+            # 2. File and directory resolution (with fuzzy fallback)
             try:
                 p = self.agent.ctx.resolve(raw)
             except Exception:
-                continue
+                p = None
+            if p is None or not p.exists():
+                candidates = []
+                for entry in self.agent.ctx.root.rglob("*"):
+                    if any(part in (".git", "__pycache__", "node_modules", ".venv", "venv") for part in entry.parts):
+                        continue
+                    if entry.is_file():
+                        rel_str = str(entry.relative_to(self.agent.ctx.root)).replace("\\", "/")
+                        if _is_subsequence(raw, rel_str):
+                            candidates.append(entry)
+                if len(candidates) == 1:
+                    p = candidates[0]
+                elif p is None or not p.exists():
+                    continue
+
             if is_secret_path(p) and not self.agent.ctx.allow_secrets:
                 console.print(f"[yellow]Skipped @{escape(raw)}: looks like a secrets file.[/yellow]")
                 continue
@@ -703,11 +1189,13 @@ class Repl:
             table.add_row(f"[bold]/{cmd.name}[/bold] [dim]{escape(cmd.args)}[/dim]", escape(cmd.help) + alias)
         console.print(table)
         console.print("\n[bold]Input[/bold]\n"
-                      "  @path          attach a file or directory listing (or an image) to your message\n"
+                      "  @path          attach a file, directory, or fuzzy path (e.g. @test_job)\n"
+                      "  @git / @diff   attach current git status or uncommitted diff\n"
+                      "  @todos         attach active project task list\n"
+                      "  Shift+Enter    insert a newline (also Esc+Enter / Ctrl+J)\n"
                       "  Alt+V          paste an image from the clipboard (needs a vision model)\n"
                       "  !command       run a shell command yourself (not sent to the model)\n"
                       "  #note          append a note to ./HUBBLE.md (project memory)\n"
-                      "  Esc+Enter      new line (also Ctrl+J)\n"
                       "  Shift+Tab      cycle permission mode\n"
                       "  Ctrl+C         cancel the running turn · Ctrl+D quit\n"
                       "\n[bold]Skills[/bold]: .hubble/skills/<name>/SKILL.md (or ~/.hubble/skills for every "
@@ -1002,11 +1490,54 @@ class Repl:
     def cmd_cost(self, arg):
         a = self.agent
         window = int(a.settings.get("context_window", 128000))
+        subs = getattr(a, "subagent_history", [])
+
+        if not subs:
+            console.print(f"  model          {escape(a.model)}")
+            console.print(f"  input tokens   {a.total_prompt_tokens:,}")
+            console.print(f"  output tokens  {a.total_completion_tokens:,}")
+            console.print(f"  total tokens   {(a.total_prompt_tokens + a.total_completion_tokens):,}")
+            console.print(f"  context        ~{a.context_tokens:,} / {window:,} ({a.context_ratio():.0%})")
+            console.print(f"  messages       {len(a.messages)}")
+            return
+
+        parent_prompt = max(0, a.total_prompt_tokens - sum(s.get("prompt_tokens", 0) for s in subs))
+        parent_comp = max(0, a.total_completion_tokens - sum(s.get("completion_tokens", 0) for s in subs))
+
+        console.print("[bold cyan]Main Agent[/bold cyan]")
         console.print(f"  model          {escape(a.model)}")
-        console.print(f"  input tokens   {a.total_prompt_tokens:,}")
-        console.print(f"  output tokens  {a.total_completion_tokens:,}")
+        console.print(f"  input tokens   {parent_prompt:,}")
+        console.print(f"  output tokens  {parent_comp:,}")
         console.print(f"  context        ~{a.context_tokens:,} / {window:,} ({a.context_ratio():.0%})")
         console.print(f"  messages       {len(a.messages)}")
+
+        console.print(f"\n[bold magenta]Subagents ({len(subs)})[/bold magenta]")
+        tbl = Table.grid(padding=(0, 2))
+        tbl.add_column(style="bold", no_wrap=True)                  # name/label
+        tbl.add_column(style="dim cyan", no_wrap=True)              # model
+        tbl.add_column(justify="right", no_wrap=True)               # input tokens
+        tbl.add_column(justify="right", no_wrap=True)               # output tokens
+        tbl.add_column(justify="right", no_wrap=True)               # context
+        tbl.add_column(justify="right", style="dim", no_wrap=True)  # status/tools
+
+        tbl.add_row("Agent / Task", "Model", "Input (Prompt)", "Output (Compl)", "Context", "Status")
+        for s in subs:
+            ctx_ratio = (s['context_tokens'] / s['context_window']) if s.get('context_window') else 0
+            ctx_str = f"~{s['context_tokens']:,} ({ctx_ratio:.0%})" if s.get('context_tokens') else "-"
+            tbl.add_row(
+                f"• {escape(s.get('label', 'task')[:32])}",
+                escape(s.get('model', a.model)),
+                f"{s.get('prompt_tokens', 0):,}",
+                f"{s.get('completion_tokens', 0):,}",
+                ctx_str,
+                f"{s.get('status', 'done')} ({s.get('tool_calls', 0)} tools)",
+            )
+        console.print(tbl)
+
+        console.print(f"\n[bold green]Session Total (Main + Subagents)[/bold green]")
+        console.print(f"  total input    {a.total_prompt_tokens:,}")
+        console.print(f"  total output   {a.total_completion_tokens:,}")
+        console.print(f"  combined       {(a.total_prompt_tokens + a.total_completion_tokens):,}")
 
     def cmd_context(self, arg):
         a = self.agent
@@ -1017,6 +1548,13 @@ class Repl:
                       f"(memory: {len(a.memory)} file(s), pinned: {len(a.pinned)})")
         console.print(f"  tool schemas   ~{tool_tokens:,} tokens ({len(a.tools)} tools)")
         console.print(f"  messages       ~{estimate_messages(a.messages):,} tokens ({len(a.messages)} messages)")
+        subs = getattr(a, "subagent_history", [])
+        if subs:
+            console.print(f"\n[bold]Subagent Contexts ({len(subs)} executed)[/bold]")
+            for s in subs:
+                ctx_ratio = (s['context_tokens'] / s['context_window']) if s.get('context_window') else 0
+                console.print(f"  • {escape(s.get('label', 'task'))} [dim]({escape(s.get('model', ''))})[/dim]: "
+                              f"~{s.get('context_tokens', 0):,} / {s.get('context_window', 0):,} tokens ({ctx_ratio:.0%})")
 
     def cmd_undo(self, arg):
         restored = self.agent.ctx.undo()
@@ -1074,6 +1612,7 @@ class Repl:
             target_file.write_text(LENS_TEMPLATE, encoding="utf-8")
             self.agent.reload_memory()
             console.print(f"[green]Created {escape(str(target_file))} with design language and coding style guidelines.[/green]")
+            console.print(f"[green]Developer Lens updated: {len(self.agent.lens)} active configuration(s).[/green]")
             console.print("[dim]Edit LENS.md or add rules via '/lens add <preference>'.[/dim]")
             return
 
@@ -1088,6 +1627,7 @@ class Repl:
                 target_file.write_text(existing.rstrip("\n") + f"\n- {rest}\n", encoding="utf-8")
             self.agent.reload_memory()
             console.print(f"[green]Saved preference to {escape(str(target_file))}[/green]")
+            console.print(f"[green]Developer Lens updated: {len(self.agent.lens)} active configuration(s).[/green]")
             return
 
         lens_files = find_lens_files(self.agent.ctx.root)
@@ -1322,34 +1862,162 @@ class Repl:
                       "/worktree exit returns to the main checkout.[/dim]")
 
     def cmd_agents(self, arg):
-        from hubble.subagents import TEMPLATE as AGENT_TEMPLATE
+        from hubble.subagents import BUILTIN_AGENTS, save_agent_definition
         parts = arg.split()
-        if parts and parts[0] == "new":
-            if len(parts) < 2 or not re.match(r"^[a-z0-9][a-z0-9_-]{0,40}$", parts[1].lower()):
-                console.print("Usage: /agents new <name> [user]  (lowercase letters, digits, - or _)")
+        subcmd = parts[0].lower() if parts else ""
+
+        all_defs = dict(BUILTIN_AGENTS)
+        for a in (self.agent.agent_defs or []):
+            all_defs[a.name] = a
+
+        if not subcmd:
+            if not all_defs:
+                console.print("[dim]No agents available. /agent new creates one.[/dim]")
+                return
+
+            console.print("\n[bold]Specialist Agents:[/bold]")
+            for a in sorted(all_defs.values(), key=lambda x: x.name):
+                color = a.color if a.color in ("cyan", "magenta", "green", "yellow", "blue", "red", "purple", "orange") else "cyan"
+                props = [a.capability]
+                if getattr(a, "fork_context", False):
+                    props.append("forks context")
+                if a.model:
+                    props.append(f"model {a.model}")
+                if a.tools:
+                    props.append(f"tools: {', '.join(a.tools)}")
+                extra_str = ", ".join(props)
+                console.print(f"  [{color}][bold]{escape(a.name)}[/bold][/{color}] [dim]({escape(a.scope)}; {escape(extra_str)})[/dim]")
+                console.print(f"    {escape(a.description)}")
+
+            console.print("\n[dim]Commands: /agent new (create agent) · /agent fork <name> (fork session) · /agent <name>[/dim]")
+            console.print("[dim]The model picks one with the task tool; or ask: \"use the <name> agent to ...\"[/dim]\n")
+            return
+
+        if subcmd in ("new", "create", "add"):
+            name = parts[1].lower() if len(parts) > 1 else ""
+            scope = parts[2].lower() if len(parts) > 2 and parts[2].lower() in ("user", "project") else ""
+            desc = ""
+            prompt = ""
+            capability = "read_only"
+            color = "cyan"
+            fork_context = False
+
+            try:
+                while not name or not re.match(r"^[a-z0-9][a-z0-9_-]{0,40}$", name):
+                    if name:
+                        console.print("[yellow]Invalid name. Use lowercase letters, digits, - or _.[/yellow]")
+                    name = console.input("[bold cyan]Agent name[/bold cyan] (lowercase letters, digits, - or _): ").strip().lower()
+                    if not name:
+                        console.print("[yellow]Agent creation cancelled.[/yellow]")
+                        return
+
+                desc = console.input(f"[bold cyan]Description[/bold cyan] (what '{name}' does / when to use): ").strip()
+                if not desc:
+                    desc = f"Specialist sub-agent for {name}"
+
+                prompt = console.input(f"[bold cyan]Role / system prompt[/bold cyan]: ").strip()
+                if not prompt:
+                    prompt = f"You are a specialist {name} sub-agent. Implement the assigned task thoroughly and report back."
+
+                cap_choice = console.input("[bold cyan]Capability[/bold cyan] [1. read_only, 2. edit] (default: 1): ").strip().lower()
+                capability = "edit" if cap_choice in ("2", "edit") else "read_only"
+
+                color_choice = console.input("[bold cyan]Color selection[/bold cyan] (cyan, magenta, green, yellow, blue, red) (default: cyan): ").strip().lower()
+                valid_colors = ("cyan", "magenta", "green", "yellow", "blue", "red", "purple", "orange")
+                color = color_choice if color_choice in valid_colors else "cyan"
+
+                fork_choice = console.input("[bold cyan]Fork parent context by default?[/bold cyan] [yes / no] (default: no): ").strip().lower()
+                fork_context = fork_choice in ("yes", "y", "true", "1")
+
+                if not scope:
+                    scope_choice = console.input("[bold cyan]Scope[/bold cyan] [project / user] (default: project): ").strip().lower()
+                    scope = "user" if scope_choice.startswith("u") else "project"
+
+            except (EOFError, KeyboardInterrupt):
+                if not name or not re.match(r"^[a-z0-9][a-z0-9_-]{0,40}$", name):
+                    console.print("\n[yellow]Agent creation cancelled.[/yellow]")
+                    return
+                desc = desc or f"Specialist sub-agent for {name}"
+                prompt = prompt or f"You are a specialist {name} sub-agent."
+                capability = capability or "read_only"
+                color = color or "cyan"
+                scope = scope or "project"
+
+            agent_def = save_agent_definition(
+                root=self.agent.ctx.root,
+                name=name,
+                description=desc,
+                prompt=prompt,
+                capability=capability,
+                color=color,
+                fork_context=fork_context,
+                scope=scope,
+            )
+            self.agent.reload_agents()
+            console.print(f"[green]Successfully created agent '[bold]{escape(name)}[/bold]' ({scope} scope)![/green]")
+            console.print(f"[dim]Saved to {escape(str(agent_def.path))}[/dim]")
+            return
+
+        if subcmd == "fork":
+            if len(parts) < 2:
+                console.print("Usage: /agent fork <name> [project|user]")
                 return
             name = parts[1].lower()
-            base = HOME_DIR / "agents" if len(parts) > 2 and parts[2] == "user" else \
-                self.agent.ctx.root / ".hubble" / "agents"
-            path = base / f"{name}.md"
-            if path.exists():
-                console.print(f"[yellow]Already exists: {escape(str(path))}[/yellow]")
+            if not re.match(r"^[a-z0-9][a-z0-9_-]{0,40}$", name):
+                console.print("[red]Invalid name. Use lowercase letters, digits, - or _.[/red]")
                 return
-            base.mkdir(parents=True, exist_ok=True)
-            path.write_text(AGENT_TEMPLATE.format(name=name), encoding="utf-8")
+            scope = parts[2].lower() if len(parts) > 2 and parts[2].lower() == "user" else "project"
+
+            last_user_prompt = ""
+            for m in reversed(getattr(self.agent, "messages", [])):
+                if m.get("role") == "user":
+                    content = m.get("content", "")
+                    if isinstance(content, str) and content.strip():
+                        last_user_prompt = content.strip()
+                        break
+
+            focus_desc = (last_user_prompt[:80] + "...") if len(last_user_prompt) > 80 else last_user_prompt
+            description = f"Forked session specialist for: {focus_desc}" if focus_desc else f"Forked specialist agent '{name}'"
+            prompt = (
+                f"You are a specialized '{name}' sub-agent forked directly from the active session.\n"
+                f"You have full inherited context of the parent conversation history.\n"
+            )
+            if last_user_prompt:
+                prompt += f"\nParent session focus:\n{last_user_prompt}\n"
+            prompt += "\nExecute assigned tasks with deep context awareness and report back."
+
+            agent_def = save_agent_definition(
+                root=self.agent.ctx.root,
+                name=name,
+                description=description,
+                prompt=prompt,
+                capability="edit",
+                color="magenta",
+                fork_context=True,
+                scope=scope,
+            )
             self.agent.reload_agents()
-            console.print(f"[green]Created {escape(str(path))}[/green] [dim]— write its description and prompt; "
-                          "the model delegates to it with the task tool.[/dim]")
+            console.print(f"[green]Created forked specialist agent '[bold]{escape(name)}[/bold]' (fork_context: true)![/green]")
+            console.print(f"[dim]Saved to {escape(str(agent_def.path))} · Full session history will be forked when invoked.[/dim]")
             return
-        if not self.agent.agent_defs:
-            console.print("[dim]No custom agents. /agents new <name> creates one in .hubble/agents/.[/dim]")
+
+        if subcmd in all_defs:
+            a = all_defs[subcmd]
+            color = a.color if a.color in ("cyan", "magenta", "green", "yellow", "blue", "red", "purple", "orange") else "cyan"
+            console.print(f"[{color}][bold]{escape(a.name)}[/bold][/{color}] [dim]({escape(a.scope)})[/dim]")
+            console.print(f"  Description:  {escape(a.description)}")
+            console.print(f"  Capability:   {escape(a.capability)}")
+            console.print(f"  Color:        {escape(a.color or 'default')}")
+            console.print(f"  Fork Context: {a.fork_context}")
+            if a.model:
+                console.print(f"  Model:        {escape(a.model)}")
+            if a.tools:
+                console.print(f"  Tools:        {', '.join(a.tools)}")
+            console.print(f"\n[bold]System Prompt:[/bold]\n{escape(a.prompt)}\n")
             return
-        for a in self.agent.agent_defs:
-            extra = ", ".join(x for x in (a.capability, a.model and f"model {a.model}",
-                                          a.tools and f"tools: {', '.join(a.tools)}") if x)
-            console.print(f"  [bold]{escape(a.name)}[/bold] [dim]({escape(a.scope)}; {escape(extra)})[/dim]  "
-                          f"{escape(a.description)}")
-        console.print("[dim]The model picks one with the task tool; or ask: \"use the <name> agent to ...\"[/dim]")
+
+        console.print(f"[yellow]Unknown agent or subcommand: {escape(subcmd)}[/yellow]")
+        console.print("[dim]Usage: /agent [new|create|add|fork <name>|<name>][/dim]")
 
     def cmd_plugin(self, arg):
         from hubble import plugins
@@ -1500,13 +2168,13 @@ class Repl:
             return
         if target in ("regular", "default", "normal", "word", "wordmark"):
             chosen = "regular"
-            label = "regular (clean bold wordmark: ✦ HUBBLE)"
+            label = "regular (clean bold wordmark: ▲ HUBBLE)"
         elif target in ("block", "ascii", "ansi"):
             chosen = "block"
             label = "block (classic 6-row ANSI Shadow block letters)"
         elif target in ("small", "compact", "mini", "one-line"):
             chosen = "small"
-            label = "small (1-line minimal wordmark: ✦ Hubble)"
+            label = "small (1-line minimal wordmark: ▲ Hubble)"
         elif target in ("big", "pixel", "large"):
             chosen = "big"
             label = "big (9-row pixel letters)"
@@ -1520,13 +2188,56 @@ class Repl:
 
     def cmd_thinking(self, arg):
         ev = self.agent.events
-        if arg.lower() in ("on", "off"):
-            ev.show_reasoning = arg.lower() == "on"
+        arg = (arg or "").strip().lower()
+        if arg in ("view", "inspect", "show"):
+            thought = getattr(ev, "last_thinking", "") or ""
+            if not thought and getattr(ev, "accordion", None):
+                thought = ev.accordion.get_full_text()
+            thought = thought.strip()
+            if not thought:
+                console.print("[dim]No reasoning text captured in the last turn.[/dim]")
+                return
+            from rich import box
+            from rich.panel import Panel
+            from rich.text import Text
+            from hubble.theme import get_palette, _to_rich_style
+            from hubble.ui import ACTIVE_THEME
+
+            pal = get_palette(ACTIVE_THEME)
+            title = _to_rich_style(pal.thought_title) or "bold cyan"
+            text_style = _to_rich_style(pal.thought_text) or "dim"
+            border_color = "cyan"
+            for token in title.split():
+                if token not in ("bold", "italic", "underline", "dim", "reverse"):
+                    border_color = token
+                    break
+            console.print(Panel(
+                Text(thought, style=text_style),
+                title=f"[{title}] Thinking / Chain of Thought [/{title}]",
+                title_align="left",
+                border_style=border_color,
+                box=box.ROUNDED,
+                padding=(0, 1),
+            ))
+            return
+        if arg in ("on", "off"):
+            ev.show_reasoning = arg == "on"
         else:
             ev.show_reasoning = not getattr(ev, "show_reasoning", False)
-        state = "shown" if ev.show_reasoning else "hidden (the spinner counts thinking tokens)"
+        state = "shown live" if ev.show_reasoning else "collapsed accordion (use /thinking view to inspect)"
         save_user_setting("show_reasoning", ev.show_reasoning)
-        console.print(f"[green]Reasoning text {state}.[/green]")
+        console.print(f"[green]Reasoning display: {state}.[/green]")
+
+    def cmd_multiline(self, arg):
+        arg = (arg or "").strip().lower()
+        if arg in ("on", "1", "true"):
+            self.multiline_mode = True
+        elif arg in ("off", "0", "false"):
+            self.multiline_mode = False
+        else:
+            self.multiline_mode = not getattr(self, "multiline_mode", False)
+        mode = "enabled (Enter adds newline, Esc+Enter submits)" if self.multiline_mode else "disabled (Enter submits, Shift+Enter adds newline)"
+        console.print(f"[green]Multiline mode {mode}.[/green]")
 
     def cmd_sandbox(self, arg):
         from hubble.sandbox import effective_mode, native_kind, why_unavailable

@@ -45,12 +45,104 @@ class Symbol:
         return f"{self.path}:{self.line}: [{self.kind}] {parent_prefix}{self.name}{sig}{doc}"
 
 
+def _scan_signature(lines: List[str], start_idx: int, start_col: int = 0, max_lookahead: int = 15) -> Tuple[str, int]:
+    """Scan forward from start_idx and start_col to find matching closing parenthesis for signature."""
+    first_line = lines[start_idx][start_col:]
+    buf = [first_line]
+    curr = start_idx
+    depth = first_line.count("(") - first_line.count(")")
+    while depth > 0 and curr + 1 < len(lines) and (curr + 1 - start_idx) < max_lookahead:
+        curr += 1
+        line = lines[curr]
+        buf.append(line.strip())
+        depth += line.count("(") - line.count(")")
+        if depth <= 0:
+            break
+    joined = " ".join(buf)
+    start_p = joined.find("(")
+    end_p = joined.rfind(")")
+    if 0 <= start_p < end_p:
+        sig = re.sub(r"\s+", " ", joined[start_p:end_p + 1])
+        return sig, curr
+    return "()", curr
+
+
+_PY_CLASS_RE = re.compile(r"^(\s*)class\s+([A-Za-z0-9_]+)(?:\((.*?)\))?\s*:")
+_PY_FUNC_RE = re.compile(r"^(\s*)(async\s+)?def\s+([A-Za-z0-9_]+)\s*\(")
+
+
+def _extract_python_fallback(source: str, rel_path: str) -> List[Symbol]:
+    """Fallback line-based extractor for Python when ast.parse encounters a SyntaxError."""
+    symbols: List[Symbol] = []
+    lines = source.splitlines()
+    class_stack: List[Tuple[int, str]] = []  # (indent_level, class_name)
+    n = len(lines)
+    i = 0
+    while i < n:
+        line = lines[i]
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            i += 1
+            continue
+
+        indent = len(line) - len(line.lstrip())
+        while class_stack and class_stack[-1][0] >= indent:
+            class_stack.pop()
+
+        m_class = _PY_CLASS_RE.match(line)
+        if m_class:
+            c_name = m_class.group(2)
+            c_bases = f"({m_class.group(3)})" if m_class.group(3) else ""
+            doc = ""
+            if i + 1 < n and ('"""' in lines[i + 1] or "'''" in lines[i + 1]):
+                doc = lines[i + 1].strip().strip('"').strip("'").strip()
+            symbols.append(Symbol(
+                name=c_name,
+                kind="class",
+                path=rel_path,
+                line=i + 1,
+                end_line=i + 1,
+                signature=c_bases,
+                docstring=doc,
+            ))
+            class_stack.append((indent, c_name))
+            i += 1
+            continue
+
+        m_func = _PY_FUNC_RE.match(line)
+        if m_func:
+            is_async = bool(m_func.group(2))
+            f_name = m_func.group(3)
+            sig, end_idx = _scan_signature(lines, i)
+            parent = class_stack[-1][1] if class_stack else ""
+            kind = ("async method" if is_async else "method") if parent else ("async def" if is_async else "def")
+            doc = ""
+            if end_idx + 1 < n and ('"""' in lines[end_idx + 1] or "'''" in lines[end_idx + 1]):
+                doc = lines[end_idx + 1].strip().strip('"').strip("'").strip()
+            symbols.append(Symbol(
+                name=f_name,
+                kind=kind,
+                path=rel_path,
+                line=i + 1,
+                end_line=end_idx + 1,
+                signature=sig,
+                docstring=doc,
+                parent=parent,
+            ))
+            i = end_idx + 1
+            continue
+
+        i += 1
+    return symbols
+
+
 def extract_python_symbols(source: str, rel_path: str) -> List[Symbol]:
-    """Extract classes, functions, and methods using Python's standard library ast."""
+    """Extract classes, functions, and methods using Python's standard library ast,
+    falling back to line-based extraction on syntax errors."""
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError):
-        return []
+        return _extract_python_fallback(source, rel_path)
 
     symbols: List[Symbol] = []
 
@@ -120,12 +212,13 @@ def extract_python_symbols(source: str, rel_path: str) -> List[Symbol]:
 _JS_CLASS_RE = re.compile(r"^\s*(?:export\s+)?(?:default\s+)?class\s+([A-Za-z0-9_$]+)(?:\s+extends\s+([A-Za-z0-9_$.]+))?")
 _JS_INTERFACE_RE = re.compile(r"^\s*(?:export\s+)?interface\s+([A-Za-z0-9_$]+)")
 _JS_TYPE_RE = re.compile(r"^\s*(?:export\s+)?type\s+([A-Za-z0-9_$]+)\s*=")
-_JS_FUNC_RE = re.compile(r"^\s*(?:export\s+)?(?:async\s+)?function\s*([A-Za-z0-9_$]+)\s*(\([^)]*\))")
-_JS_CONST_FUNC_RE = re.compile(r"^\s*(?:export\s+)?const\s+([A-Za-z0-9_$]+)\s*=\s*(?:async\s*)?(\([^)]*\)|[A-Za-z0-9_$]+)\s*=>")
+_JS_ENUM_RE = re.compile(r"^\s*(?:export\s+)?enum\s+([A-Za-z0-9_$]+)")
+_JS_FUNC_START_RE = re.compile(r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*([A-Za-z0-9_$]+)\s*\(")
+_JS_CONST_FUNC_START_RE = re.compile(r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*=\s*(?:async\s*)?(?:\(|[A-Za-z0-9_$]+\s*=>)")
 
 
 def extract_js_ts_symbols(source: str, rel_path: str) -> List[Symbol]:
-    """Extract classes, interfaces, types, and functions from JS/TS."""
+    """Extract classes, interfaces, types, enums, and functions from JS/TS with multi-line signature support."""
     symbols: List[Symbol] = []
     lines = source.splitlines()
 
@@ -146,36 +239,46 @@ def extract_js_ts_symbols(source: str, rel_path: str) -> List[Symbol]:
             symbols.append(Symbol(name=m.group(1), kind="type", path=rel_path, line=idx, end_line=idx))
             continue
 
-        m = _JS_FUNC_RE.match(line)
+        m = _JS_ENUM_RE.match(line)
         if m:
-            symbols.append(Symbol(name=m.group(1), kind="function", path=rel_path, line=idx, end_line=idx, signature=m.group(2)))
+            symbols.append(Symbol(name=m.group(1), kind="enum", path=rel_path, line=idx, end_line=idx))
             continue
 
-        m = _JS_CONST_FUNC_RE.match(line)
+        m = _JS_FUNC_START_RE.match(line)
         if m:
-            sig = m.group(2) if m.group(2).startswith("(") else f"({m.group(2)})"
-            symbols.append(Symbol(name=m.group(1), kind="function", path=rel_path, line=idx, end_line=idx, signature=sig))
+            sig, end_idx = _scan_signature(lines, idx - 1)
+            symbols.append(Symbol(name=m.group(1), kind="function", path=rel_path, line=idx, end_line=end_idx + 1, signature=sig))
+            continue
+
+        m = _JS_CONST_FUNC_START_RE.match(line)
+        if m:
+            sig, end_idx = _scan_signature(lines, idx - 1)
+            symbols.append(Symbol(name=m.group(1), kind="function", path=rel_path, line=idx, end_line=end_idx + 1, signature=sig))
             continue
 
     return symbols
 
 
-_GO_METHOD_RE = re.compile(r"^\s*func\s*\(([^)]+)\)\s*([A-Za-z0-9_]+)\s*(\([^)]*\))")
-_GO_FUNC_RE = re.compile(r"^\s*func\s+([A-Za-z0-9_]+)\s*(\([^)]*\))")
+_GO_METHOD_START_RE = re.compile(r"^\s*func\s*\(([^)]+)\)\s*([A-Za-z0-9_]+)\s*\(")
+_GO_FUNC_START_RE = re.compile(r"^\s*func\s+([A-Za-z0-9_]+)\s*\(")
 _GO_TYPE_RE = re.compile(r"^\s*type\s+([A-Za-z0-9_]+)\s+(struct|interface)")
 
 
 def extract_go_symbols(source: str, rel_path: str) -> List[Symbol]:
+    """Extract struct/interface types, funcs, and methods from Go with multi-line signature support."""
     symbols: List[Symbol] = []
-    for idx, line in enumerate(source.splitlines(), 1):
-        m = _GO_METHOD_RE.match(line)
+    lines = source.splitlines()
+    for idx, line in enumerate(lines, 1):
+        m = _GO_METHOD_START_RE.match(line)
         if m:
             recv = m.group(1).split()[-1].lstrip("*")
-            symbols.append(Symbol(name=m.group(2), kind="method", path=rel_path, line=idx, end_line=idx, signature=m.group(3), parent=recv))
+            sig, end_idx = _scan_signature(lines, idx - 1, start_col=m.end() - 1)
+            symbols.append(Symbol(name=m.group(2), kind="method", path=rel_path, line=idx, end_line=end_idx + 1, signature=sig, parent=recv))
             continue
-        m = _GO_FUNC_RE.match(line)
+        m = _GO_FUNC_START_RE.match(line)
         if m:
-            symbols.append(Symbol(name=m.group(1), kind="func", path=rel_path, line=idx, end_line=idx, signature=m.group(2)))
+            sig, end_idx = _scan_signature(lines, idx - 1)
+            symbols.append(Symbol(name=m.group(1), kind="func", path=rel_path, line=idx, end_line=end_idx + 1, signature=sig))
             continue
         m = _GO_TYPE_RE.match(line)
         if m:
@@ -184,7 +287,7 @@ def extract_go_symbols(source: str, rel_path: str) -> List[Symbol]:
     return symbols
 
 
-_RS_FN_RE = re.compile(r"^\s*(?:pub(?:\([^)]+\))?\s+)?(?:async\s+)?fn\s+([A-Za-z0-9_]+)\s*(\([^)]*\))")
+_RS_FN_START_RE = re.compile(r"^\s*(?:pub(?:\([^)]+\))?\s+)?(?:async\s+)?fn\s+([A-Za-z0-9_]+)\s*\(")
 _RS_STRUCT_RE = re.compile(r"^\s*(?:pub(?:\([^)]+\))?\s+)?struct\s+([A-Za-z0-9_]+)")
 _RS_ENUM_RE = re.compile(r"^\s*(?:pub(?:\([^)]+\))?\s+)?enum\s+([A-Za-z0-9_]+)")
 _RS_TRAIT_RE = re.compile(r"^\s*(?:pub(?:\([^)]+\))?\s+)?trait\s+([A-Za-z0-9_]+)")
@@ -192,19 +295,22 @@ _RS_IMPL_RE = re.compile(r"^\s*impl(?:\s*<[^>]+>)?\s+(?:([A-Za-z0-9_]+)\s+for\s+
 
 
 def extract_rust_symbols(source: str, rel_path: str) -> List[Symbol]:
+    """Extract structs, enums, traits, and functions from Rust with multi-line signature support."""
     symbols: List[Symbol] = []
+    lines = source.splitlines()
     current_impl = ""
-    for idx, line in enumerate(source.splitlines(), 1):
+    for idx, line in enumerate(lines, 1):
         m = _RS_IMPL_RE.match(line)
         if m:
             current_impl = m.group(2)
         if line.strip() == "}":
             current_impl = ""
 
-        m = _RS_FN_RE.match(line)
+        m = _RS_FN_START_RE.match(line)
         if m:
             kind = "method" if current_impl else "fn"
-            symbols.append(Symbol(name=m.group(1), kind=kind, path=rel_path, line=idx, end_line=idx, signature=m.group(2), parent=current_impl))
+            sig, end_idx = _scan_signature(lines, idx - 1)
+            symbols.append(Symbol(name=m.group(1), kind=kind, path=rel_path, line=idx, end_line=end_idx + 1, signature=sig, parent=current_impl))
             continue
         m = _RS_STRUCT_RE.match(line)
         if m:
@@ -219,6 +325,15 @@ def extract_rust_symbols(source: str, rel_path: str) -> List[Symbol]:
             symbols.append(Symbol(name=m.group(1), kind="trait", path=rel_path, line=idx, end_line=idx))
             continue
     return symbols
+
+
+def has_tree_sitter() -> bool:
+    """Check whether the optional tree-sitter AST parser is available."""
+    try:
+        import tree_sitter  # type: ignore
+        return True
+    except ImportError:
+        return False
 
 
 class SymbolIndex:

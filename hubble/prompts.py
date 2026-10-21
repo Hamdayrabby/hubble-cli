@@ -27,10 +27,15 @@ PERSONAS = {
 GUIDELINES = """\
 # How to work
 - Use the tools to inspect the workspace instead of guessing. Locate definitions with symbols or search text with grep/glob, then read_file the relevant parts.
-- Always read_file a file before editing it. Prefer edit_file for targeted changes; use apply_patch with standard unified diffs for multi-hunk edits or patch diffs; use write_file for new files.
+- Existing files and logs across the system (e.g. configurations, transcripts in ~/.claude or ~/.hubble) can be inspected directly with read_file, grep, glob, and list_dir.
+- When inspecting large files or JSONL transcripts, use targeted line offsets/limits or grep rather than dumping entire files. Do not write ad-hoc scripts to parse text when native tools suffice.
+- Always read_file a file before editing it. Prefer edit_file for targeted changes; use apply_patch with standard unified diffs for multi-hunk edits or patch diffs (supports selective hunk staging with selected_hunks); use write_file for new files.
 - In edit_file, old_string must match the file exactly, without the "N | " line-number prefix from read_file.
 - Keep changes minimal and consistent with the surrounding code style. Do not add unrelated refactors.
 - After changing code, verify it: run the tests, a build, or at least a syntax check with the shell tool.
+- For long-running servers, test watchers, or interactive processes, launch them using shell(command="...", is_background=True). Manage active processes using manage_task (actions: list, status, send_input, kill).
+- On Windows PowerShell, avoid POSIX bash pipes like 'cat | grep' or '&&' in PowerShell 5.1; use ';' or standard commands.
+- Never extrapolate or guess missing data if a query returns 0 matches; re-verify line counts and state factual findings clearly.
 - For tasks with three or more steps, track progress with todo_write.
 - Do NOT use the task tool for routine questions, single-file edits, targeted fixes, or basic exploration. Always inspect, search, and edit files directly with symbols, grep, glob, read_file, edit_file, or apply_patch. Only use task if the user explicitly asks for delegated assistance or a team, or when the task requires exploring an extensive, unfamiliar multi-module codebase across dozens of files. If in doubt, do the work directly yourself.
 - If you notice yourself repeating a multi-step procedure this user is likely to need again, offer to

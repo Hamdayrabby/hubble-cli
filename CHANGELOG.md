@@ -1,5 +1,72 @@
 # Changelog
 
+## 4.3.15
+
+- **Claude Code & Command Code Multi-Icon Pondering Animation:**
+  - **Dynamic Multi-Icon Cycles:** Replaced the plain Braille dot spinner with Claude Code and Command Code's iconic multi-icon animations. Transitions between blooming flower glyphs (`✻`, `✼`, `✽`, `✾`, `✿`, `❀`, `❁`, `❂`), celestial starbursts and sparks (`✦`, `✧`, `✶`, `✷`, `✸`, `✹`, `✺`, `✢`), breathing botanical blooms, and cosmic prisms.
+  - **Pondering Verbs in Progression:** Begins immediately with `"Pondering…"` on query execution and progresses dynamically through gerund action verbs (`Pondering…`, `Synthesizing…`, `Cogitating…`, `Contemplating…`, `Analyzing…`, `Focusing the lens…`, `Connecting dots…`, `Percolating…`, `Aligning mirrors…`, `Marinating…`, `Noodling…`, `Formulating response…`) every 2.8s.
+  - **Coordinated Icon & Text Shimmer Wave:** The electric cyan/white light wave sweeps smoothly across both the active blooming icon and the verb characters.
+  - **Subagent Preloader Synchronization:** Single and multi-subagent indicators also utilize the organic blooming glyphs with explicit purple subagent role badges.
+
+## 4.3.14
+
+- **Claude Code Spinning Glyphs & Rotating Changing Words for Hubble Responses:**
+  - **Dynamic Rotating Verbs:** When just Hubble is giving responses, thinking, or formulating thoughts, it now dynamically rotates verbs every 2.8s (`Thinking…`, `Synthesizing…`, `Analyzing…`, `Formulating response…`, `Pondering…`, `Focusing the lens…`, `Connecting dots…`) with a luminous cyan-to-white shimmer wave sweeping across the letters, exactly like Claude Code.
+  - **Live Tool Activity:** When executing tools, displays the active tool call (e.g. `Fetching https://pypi.org/…`, `Reading file…`) with elapsed time, token counts, and interrupt hints.
+  - **Explicit Subagent Distinction:** When delegated subagents are active, explicitly displays the purple subagent preloader (`1 subagent running · ...` or `Orchestrating {N} subagents ...`).
+- **Thread-Safe Approval Bridge & Crash-Proof Prompt Loop:**
+  - **Eliminated Win32 Executor Shutdown:** Fixed the root cause where worker approvals competed with `session.prompt()`, causing `RuntimeError: Executor shutdown has been called` and freezing the prompt.
+  - **Prompt Box & Footer Always Pinned:** The interactive prompt box (`❯ `) and bottom toolbar footer are guaranteed to remain visible, responsive, and pinned at all times.
+
+## 4.3.13
+
+- **Zero-Flicker & Zero-Lag Claude Code Subagent Preloader:**
+  - **Explicit Subagent Orchestration Status:** Added an explicit subagent indicator badge in vibrant purple (`1 subagent running · ` for single subagents, and `Orchestrating {N} subagents ({running} running · {done} done · {elapsed}s)` for multi-agent teams) so you can instantly tell whether the main agent is executing directly or orchestrating delegated subagents.
+  - **Eliminated Terminal Redraw Fighting & Severe Lag:** Fixed the root cause of flicker and terminal lag where background `rich.live.Live` loops dumped escape codes into `sys.stdout` concurrently with `prompt_toolkit`'s `patch_stdout` at 10 FPS. During interactive REPL runs, `Live` is now properly disabled in favor of native prompt_toolkit rendering.
+  - **Claude Code-Style Native Live Preloader:** Subagents now display their live activity directly inside the prompt message buffer via `SubagentBoard.to_formatted_text()`, featuring the rotating Claude braille spinner (`⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏`) in bold cyan, bold task label, stats (`{tools} tools · {tokens} tok · {elapsed}s`), and live action text.
+  - **Guaranteed Prompt Box Visibility:** The prompt box (`❯ `) is always cleanly displayed on its own line directly below the subagent preloader, eliminating the bug where `❯ ` was appended onto the end of the subagent text. Users can seamlessly type, edit, and queue prompts while subagents run.
+  - **Single-Line Completion in Scrollback:** When a subagent completes, commits a single clean line (`✔ <subagent>: <label> · <stats> · <detail>`) to the terminal scrollback once and smoothly clears the live preloader.
+  - **Adaptive Redraw Frequency:** Smooth 10 FPS (100ms) redraws while tasks or subagents are actively running, automatically returning to a 1.0s low-overhead cadence when idle.
+
+## 4.3.12
+
+- **Restored Single-Line Subagent Display with Claude-Style Spinner:**
+  - **Eliminated Multiline Step Spam:** Removed the tree-printing hack (`└ thinking`, `└ searching...`) that spammed dozens of vertical lines during subagent runs.
+  - **Single-Line Live In-Place Rendering (`SubagentBoard`):** Subagent activity is rendered strictly on **one single line** that updates dynamically in-place as the subagent navigates tools, reads files, and executes commands.
+  - **Claude-Style Braille Spinner Icon:** Subagents now display the iconic rotating braille spinner (`⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏`) in vibrant cyan, cycling smoothly to indicate active work exactly like Claude Code.
+  - **Clean Single-Line Completion:** When finished, commits a single clean line (`✔ <subagent>: <label> · <stats> · <detail>`) without polluting terminal scrollback.
+- **Distinct User Prompt Color:**
+  - Fixed user prompt text color blending in with Hubble's response by setting dedicated `user_text` colors across all palettes (e.g. bright cyan `#00d7ff` in terminal, `#58a6ff` in dark, `#7aa2f7` in Tokyo Night).
+  - User prompts and Hubble responses now have contrasting, distinct colors for effortless visual skimming.
+
+## 4.3.11
+
+- **Itemized Subagent Metrics & Clean Classic Dashboard:**
+  - **Clean Classic Subagent Dashboard (`SubagentBoard`):**
+    - Brought back the clean, unbloated 4-column design for the live subagent board (`icon`, `label`, `stats`, `action`).
+    - Stats remain clean and balanced (`{tools} tools · {tokens} tok · {elapsed}s`) during live execution without noisy extra columns or badge bloat.
+  - **Audit & Cost Tracking (`/cost`, `/tokens`):**
+    - Itemized breakdown of the **Main Agent** (model, input prompt tokens, output completion tokens, context usage, message count).
+    - Itemized table of all executed **Subagents** with each subagent's task name, model used, prompt tokens, completion tokens, context consumption, status, and tool calls.
+    - Combined **Session Total** summing main agent + all subagents.
+  - **Context Inspection (`/context`):**
+    - Displays completed subagent allocations and peak context sizes alongside the main agent's system prompt, tool schemas, and conversation history.
+
+## 4.3.10
+
+- **Restored Signature Hubble Shimmer Animation (Zero-Flicker):**
+  - Brought back Hubble's signature thinking & working animation above the prompt input:
+    `◆ Charting the stars... (1s · ctrl+c to interrupt)`
+  - Retains all rotating space verbs ("Charting the stars", "Aligning mirrors", "Scanning the cosmos", "Focusing the lens"...), pulsing glyphs, and the warm gradient shimmer wave (`#d7875f`, `#ffaf87`, `bold #ffe7d7`).
+  - Rendered natively directly inside prompt_toolkit's prompt message buffer (`_prompt_message`), so it sweeps smoothly at 10 FPS with **zero cursor jumping, zero terminal clearing, and zero flicker**.
+  - Sits directly above the prompt box (`❯`), allowing the user to type and queue further prompts while watching Hubble think in real time.
+- **Single Pinned Bottom Bar (Zero Duplication):**
+  - Removed redundant `spinner.FOOTER` rendering in the scrollback during prompt-driven execution.
+  - Hubble now cleanly features a single, unified bottom toolbar pinned at the base of the terminal window, exactly like Google Antigravity CLI.
+- **Zero-Flicker & Zero-Lag Architecture:**
+  - Fixed terminal flicker and CPU lag caused by background `rich.live.Live` loops fighting with `patch_stdout` at 15–30 FPS.
+  - Live token counters, speed (tok/s), and active turn metrics update smoothly in the bottom toolbar in real time.
+
 ## 4.3.9
 
 - **Smooth 60 FPS Animation:**

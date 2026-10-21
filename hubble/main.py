@@ -177,6 +177,7 @@ def main(argv=None):
         root=root,
         extra_dirs=[Path(d).expanduser().resolve() for d in settings.get("additional_dirs", [])],
         allow_secrets=bool(settings.get("allow_secret_files")),
+        allow_external_reads=bool(settings.get("allow_external_reads", True)),
         shell_argv=detect_shell(settings.get("shell", "auto")),
         shell_timeout=int(settings.get("shell_timeout", 120)),
         sandbox=settings.get("shell_sandbox", "auto"),

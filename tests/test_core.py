@@ -534,7 +534,7 @@ def test_home_shows_the_hubble_starship_with_block_logo():
     short = lines(compose_grid(110, 16, 1.0, st, tips, "4"))  # e.g. a VS Code panel
     assert any("H U B B L E" in l for l in short)             # the ship still shows
     default_grid = lines(compose_grid(110, 30, 1.0, st, tips, "4"))
-    assert "✦ H U B B L E" in default_grid[0]                  # clean wordmark default
+    assert "▲ H U B B L E" in default_grid[0]                  # clean wordmark default
 
 
 def test_visuals_render_at_any_width():

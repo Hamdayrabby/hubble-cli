@@ -81,7 +81,7 @@ def gradient_logo() -> Text:
 
 def small_logo() -> Text:
     """Tiny one-liner used in /home fallback and very short terminals."""
-    out = Text("✦ ", style="bold #5f87ff")
+    out = Text("▲ ", style="bold #5f87ff")
     for i, ch in enumerate(NAME):
         out.append(ch, style=f"bold {_blend(GRADIENT, i / (len(NAME) - 1))}")
     return out
@@ -94,9 +94,9 @@ def wordmark_logo(version: str = "", t: float = 0.0) -> List[Text]:
     (think Antigravity / Vercel style) without towering 6-row block letters.
     The gradient slowly slides so it stays lively in the animation.
     """
-    # Line 1: ✦ icon + gradient letters with thin-space letter spacing for presence
+    # Line 1: ▲ spaceship icon + gradient letters with thin-space letter spacing for presence
     line1 = Text()
-    line1.append("\u2726 ", style="bold #5f87ff")   # icon, cyan start of gradient
+    line1.append("▲ ", style="bold #5f87ff")   # spaceship icon, cyan start of gradient
     word = NAME.upper()
     for i, ch in enumerate(word):
         shade = _blend(GRADIENT, ((i / max(len(word) - 1, 1)) + t * 0.07) % 1.0)

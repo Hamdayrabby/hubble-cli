@@ -1,5 +1,6 @@
 """OpenAI-compatible streaming client with native tool calling."""
 
+import ast
 import hashlib
 import json
 import queue
@@ -475,21 +476,155 @@ class _Retryable(Exception):
         self.wait = wait
 
 
+def _escape_newlines_in_json_strings(s: str) -> str:
+    """Escape raw literal unescaped newlines and tabs inside double-quoted string literals."""
+    out = []
+    in_str = False
+    escape = False
+    for ch in s:
+        if ch == '"' and not escape:
+            in_str = not in_str
+            out.append(ch)
+        elif in_str:
+            if escape:
+                out.append(ch)
+                escape = False
+            elif ch == '\\':
+                escape = True
+                out.append(ch)
+            elif ch == '\n':
+                out.append('\\n')
+            elif ch == '\r':
+                out.append('\\r')
+            elif ch == '\t':
+                out.append('\\t')
+            else:
+                out.append(ch)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _balance_json_brackets(s: str) -> str:
+    """Auto-close unclosed braces or brackets in truncated JSON."""
+    stack = []
+    in_str = False
+    escape = False
+    for ch in s:
+        if ch == '"' and not escape:
+            in_str = not in_str
+        elif in_str:
+            if ch == '\\' and not escape:
+                escape = True
+            else:
+                escape = False
+        else:
+            if ch in ('{', '['):
+                stack.append('}' if ch == '{' else ']')
+            elif ch in ('}', ']'):
+                if stack and stack[-1] == ch:
+                    stack.pop()
+    if in_str:
+        if s.endswith("\\") and not s.endswith("\\\\"):
+            s = s[:-1]
+        s += '"'
+    while stack:
+        s += stack.pop()
+    return s
+
+
+def repair_dirty_json(s: str) -> str:
+    """Normalize dirty JSON produced by open-weights or smaller models.
+
+    Handles:
+    - Trailing commas before } and ]
+    - Unescaped newlines/tabs inside string literals
+    - Python constants (True, False, None) -> (true, false, null)
+    - Single-quoted keys and values
+    """
+    s = s.strip()
+    # Normalize Python literals
+    s = re.sub(r':\s*True\b', ': true', s)
+    s = re.sub(r':\s*False\b', ': false', s)
+    s = re.sub(r':\s*None\b', ': null', s)
+    s = re.sub(r'\[\s*True\b', '[true', s)
+    s = re.sub(r'\[\s*False\b', '[false', s)
+    s = re.sub(r'\[\s*None\b', '[null', s)
+    s = re.sub(r',\s*True\b', ', true', s)
+    s = re.sub(r',\s*False\b', ', false', s)
+    s = re.sub(r',\s*None\b', ', null', s)
+
+    # Strip trailing commas
+    s = re.sub(r",\s*([}\]])", r"\1", s)
+
+    # Escape literal newlines inside strings
+    s = _escape_newlines_in_json_strings(s)
+
+    # Convert single-quoted keys and strings if no double quotes present or if clearly single-quoted
+    if "'" in s and ('"' not in s or re.search(r"\'[A-Za-z0-9_]+\'\s*:", s)):
+        # Convert 'key': to "key":
+        s = re.sub(r"(?<=[{,\s])\'([A-Za-z0-9_]+)\'\s*:", r'"\1":', s)
+        # Convert : 'value' to : "value"
+        def _repl_val(m):
+            val = m.group(1).replace('"', '\\"')
+            return f': "{val}"'
+        s = re.sub(r':\s*\'([^\']*)\'', _repl_val, s)
+
+    return s
+
+
 def parse_arguments(raw: str) -> Dict[str, Any]:
-    """Parse tool-call JSON, tolerating code fences and trailing junk from weaker models."""
+    """Parse tool-call JSON, tolerating code fences, single quotes, trailing commas,
+    unescaped newlines, and Python literals from open-weights or smaller models."""
     raw = (raw or "").strip() or "{}"
     candidates = [raw]
-    fenced = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw)
+    fenced = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.DOTALL).strip()
     if fenced != raw:
         candidates.append(fenced)
     start, end = raw.find("{"), raw.rfind("}")
     if 0 <= start < end:
         candidates.append(raw[start:end + 1])
+    if fenced != raw:
+        f_start, f_end = fenced.find("{"), fenced.rfind("}")
+        if 0 <= f_start < f_end:
+            candidates.append(fenced[f_start:f_end + 1])
+
+    # Pass 1: Standard json.loads on candidates
     for cand in candidates:
         try:
             val = json.loads(cand)
+            if isinstance(val, dict):
+                return val
         except ValueError:
-            continue
-        if isinstance(val, dict):
-            return val
+            pass
+
+    # Pass 2: ast.literal_eval fallback for Python dict representations
+    for cand in candidates:
+        try:
+            val = ast.literal_eval(cand)
+            if isinstance(val, dict):
+                return {str(k): v for k, v in val.items()}
+        except (ValueError, SyntaxError):
+            pass
+
+    # Pass 3: Repair dirty JSON
+    for cand in candidates:
+        try:
+            repaired = repair_dirty_json(cand)
+            val = json.loads(repaired)
+            if isinstance(val, dict):
+                return val
+        except ValueError:
+            pass
+
+    # Pass 4: Balance unclosed braces
+    for cand in candidates:
+        try:
+            balanced = _balance_json_brackets(repair_dirty_json(cand))
+            val = json.loads(balanced)
+            if isinstance(val, dict):
+                return val
+        except ValueError:
+            pass
+
     raise ValueError(f"Tool arguments are not a valid JSON object: {raw[:200]}")

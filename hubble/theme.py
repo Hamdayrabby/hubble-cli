@@ -16,6 +16,9 @@ from typing import Dict, List, Optional, Tuple
 
 from rich.theme import Theme
 
+ASSISTANT_ICON = "🔭"
+ASSISTANT_TITLE = "🔭 Hubble"
+
 
 @dataclass
 class ColorPalette:
@@ -63,8 +66,8 @@ COLOR_SCHEMES: Dict[str, ColorPalette] = {
         name="terminal",
         description="Default terminal palette",
         border="ansigray",
-        user_prefix="ansicyan bold",
-        user_text="",
+        user_prefix="bold #00d7ff",
+        user_text="#00d7ff",
         assistant_title="ansigreen bold",
         diff_add_bg="bg:#1a3a22",
         diff_add_fg="ansigreen",
@@ -100,7 +103,7 @@ COLOR_SCHEMES: Dict[str, ColorPalette] = {
         description="Clean GitHub-inspired light mode",
         border="#d0d7de",
         user_prefix="#0969da bold",
-        user_text="#24292f",
+        user_text="#0969da",
         assistant_title="#1a7f37 bold",
         diff_add_bg="bg:#dafbe1",
         diff_add_fg="#1a7f37",
@@ -136,7 +139,7 @@ COLOR_SCHEMES: Dict[str, ColorPalette] = {
         description="Solarized light theme",
         border="#93a1a1",
         user_prefix="#268bd2 bold",
-        user_text="#657b83",
+        user_text="#268bd2",
         assistant_title="#859900 bold",
         diff_add_bg="bg:#e9f2d1",
         diff_add_fg="#859900",
@@ -172,7 +175,7 @@ COLOR_SCHEMES: Dict[str, ColorPalette] = {
         description="High-contrast accessible light palette",
         border="#7f7f7f",
         user_prefix="#0072b2 bold",
-        user_text="#111111",
+        user_text="#0072b2",
         assistant_title="#0072b2 bold",
         diff_add_bg="bg:#e6f2f8",
         diff_add_fg="#0072b2",
@@ -208,7 +211,7 @@ COLOR_SCHEMES: Dict[str, ColorPalette] = {
         description="VS Code / GitHub dark mode",
         border="#30363d",
         user_prefix="#58a6ff bold",
-        user_text="#c9d1d9",
+        user_text="#58a6ff",
         assistant_title="#3fb950 bold",
         diff_add_bg="bg:#0d351a",
         diff_add_fg="#3fb950",
@@ -244,7 +247,7 @@ COLOR_SCHEMES: Dict[str, ColorPalette] = {
         description="Solarized dark theme",
         border="#586e75",
         user_prefix="#268bd2 bold",
-        user_text="#839496",
+        user_text="#268bd2",
         assistant_title="#859900 bold",
         diff_add_bg="bg:#1b3b18",
         diff_add_fg="#859900",
@@ -280,7 +283,7 @@ COLOR_SCHEMES: Dict[str, ColorPalette] = {
         description="High-contrast accessible dark palette",
         border="#666666",
         user_prefix="#56b4e9 bold",
-        user_text="#eeeeee",
+        user_text="#56b4e9",
         assistant_title="#56b4e9 bold",
         diff_add_bg="bg:#0f3b54",
         diff_add_fg="#56b4e9",
@@ -316,7 +319,7 @@ COLOR_SCHEMES: Dict[str, ColorPalette] = {
         description="Tokyo Night vibrant aesthetics",
         border="#414868",
         user_prefix="#7aa2f7 bold",
-        user_text="#c0caf5",
+        user_text="#7aa2f7",
         assistant_title="#9ece6a bold",
         diff_add_bg="bg:#22372b",
         diff_add_fg="#9ece6a",
@@ -394,11 +397,16 @@ def get_prompt_style(name: Optional[str] = None) -> Dict[str, str]:
     """Build prompt_toolkit style mapping for bottom toolbar, dark completion menus, and scrollbars."""
     p = get_palette(name)
     return {
+        # User input text styling and prompt styling (Antigravity cyan prompt and distinctive user input color)
+        "": p.user_text or "#00d7ff",
+        "prompt": p.user_prefix or "bold #00d7ff",
+        "prompt b": p.user_prefix or "bold #00d7ff",
+
         # Bottom Toolbar
         "bottom-toolbar": "noreverse bg:default #6c6c80",
         "bottom-toolbar.text": "noreverse bg:default",
         "tb.rule": "#303040", "tb.sep": "#44445a", "tb.dim": "#6c6c80", "tb.val": "#b8b8cc",
-        "tb.model": "bold #00d7ff", "tb.warn": "bold #ffaf00",
+        "tb.model": "bold #00d7ff", "tb.warn": "bold #ffaf00", "tb.spinner": "bold #ffaf87",
         "tb.mode-default": "#b8b8cc", "tb.mode-accept-edits": "bold #5fd787",
         "tb.mode-plan": "bold #5fafff", "tb.mode-yolo": "bold #ff5f5f",
         "tb.in": "#87afd7", "tb.out": "#af87d7", "tb.speed": "#5fd7af",

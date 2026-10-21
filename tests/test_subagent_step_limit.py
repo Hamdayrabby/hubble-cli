@@ -173,3 +173,15 @@ def test_observation_virtualization(tmp_path):
     assert "truncated for context optimization" in agent.messages[2]["content"]
     assert len(agent.messages[8]["content"]) == 2000
 
+
+def test_repeating_same_shell_call_stalls():
+    pr = _Progress()
+    call = ToolCall("s", "shell", json.dumps({"command": "pytest"}))
+    pr.note([call])
+    assert pr.stalled() is None
+    pr.note([call])
+    assert pr.stalled() is None
+    pr.note([call])
+    assert "repeating the same shell call" in pr.stalled()
+
+

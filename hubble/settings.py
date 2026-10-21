@@ -34,6 +34,7 @@ DEFAULTS: Dict[str, Any] = {
     "shell": "auto",
     "shell_timeout": 120,
     "additional_dirs": [],
+    "allow_external_reads": True,  # allow read_file/grep/glob to read existing files outside workspace
     # "auto": OS sandbox (macOS Seatbelt / Linux bubblewrap) where available, else off. Commands
     # can read anything but only write in the workspace and temp dirs. "native" | "docker" | "off".
     "shell_sandbox": "auto",
@@ -210,3 +211,56 @@ def save_user_setting(key: str, value: Any):
     data[key] = value
     HOME_DIR.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def detect_context_window(model: str, default: int = 128000) -> int:
+    """Detect model context window length from model name or identifier.
+
+    Provides accurate window limits for frontier and open-weights models:
+    - Gemini 1.5/2.5 Pro / Ultra: 2,000,000 tokens
+    - Other Gemini: 1,000,000 tokens
+    - Codestral: 256,000 tokens
+    - Claude 3 / 3.5 / 3.7 / Opus: 200,000 tokens
+    - GPT-4o, o1, Llama-3.1/3.2/3.3, Qwen-2.5, Mistral Large, DeepSeek-V3/R1: 128,000 tokens
+    - DeepSeek-Coder: 64,000 tokens
+    - 32k models (Ministral, Mistral-Nemo, InternLM, Phi-3): 32,768 tokens
+    - 16k models (GPT-3.5, Llama-2, Codellama, Mistral-7B): 16,384 tokens
+    - 8k models (legacy GPT-4): 8,192 tokens
+    """
+    if not model or not isinstance(model, str):
+        return default
+    m = model.lower()
+
+    # 2M models
+    if any(k in m for k in ("gemini-1.5-pro", "gemini-2.5-pro", "gemini-ultra")):
+        return 2_000_000
+    # 1M models
+    if "gemini" in m:
+        return 1_000_000
+    # 256k models
+    if "codestral" in m:
+        return 256_000
+    # 200k models
+    if "claude" in m:
+        return 200_000
+    # 128k models
+    if any(k in m for k in ("gpt-4o", "gpt-4-turbo", "o1", "o3", "llama-3.1", "llama-3.2", "llama-3.3",
+                           "mistral-large", "qwen-2.5", "qwen2.5", "nemotron", "deepseek-v3", "deepseek-r1",
+                           "deepseek-chat", "deepseek-reasoner")):
+        return 128_000
+    # 64k models
+    if any(k in m for k in ("deepseek-coder", "deepseek")):
+        return 64_000
+    # 32k models
+    if any(k in m for k in ("32k", "ministral", "mistral-nemo", "intern-s1", "intern-s2", "internvl", "phi-3")):
+        return 32_768
+    # 16k models
+    if any(k in m for k in ("16k", "gpt-3.5", "llama-2", "codellama", "mistral-7b", "mistral-tiny")):
+        return 16_384
+    # 8k models
+    if any(k in m for k in ("8k", "gpt-4-0314", "gpt-4-0613")):
+        return 8_192
+    if "gpt-4" in m and "32k" not in m:
+        return 8_192
+
+    return default

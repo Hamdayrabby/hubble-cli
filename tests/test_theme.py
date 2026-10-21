@@ -26,6 +26,7 @@ def test_theme_registry():
         p = COLOR_SCHEMES[name]
         assert p.name == name
         assert p.user_prefix
+        assert p.user_text
         assert p.diff_add_fg or p.diff_add_bg
         assert p.diff_del_fg or p.diff_del_bg
 
@@ -73,6 +74,10 @@ def test_get_prompt_style():
     from hubble.theme import get_prompt_style
     # Default terminal prompt style
     style_term = get_prompt_style("terminal")
+    assert "" in style_term
+    assert style_term[""] == "#00d7ff"
+    assert "prompt" in style_term
+    assert style_term["prompt"] == "bold #00d7ff"
     assert "completion-menu" in style_term
     assert "completion-menu.completion.current" in style_term
     assert "scrollbar.button" in style_term
@@ -83,6 +88,8 @@ def test_get_prompt_style():
 
     # Tokyo Night prompt style
     style_tokyo = get_prompt_style("tokyo night")
+    assert style_tokyo[""] == "#7aa2f7"
+    assert style_tokyo["prompt"] == "#7aa2f7 bold"
     assert "#16161e" in style_tokyo["completion-menu"]
     assert "#7aa2f7" in style_tokyo["completion-menu.completion.current"]
 
@@ -103,7 +110,7 @@ def test_logo_selection_and_rendering():
 
     # Regular clean wordmark logo
     grid_reg = lines(compose_grid(100, 30, 1.0, st, tips, "4.3.4", logo_style="regular"))
-    assert "✦ H\u2009U\u2009B\u2009B\u2009L\u2009E" in grid_reg[0]
+    assert "▲ H\u2009U\u2009B\u2009B\u2009L\u2009E" in grid_reg[0]
 
     # Block logo (size 1)
     grid_block = lines(compose_grid(100, 30, 1.0, st, tips, "4.3.4", logo_style="block"))
@@ -111,6 +118,6 @@ def test_logo_selection_and_rendering():
 
     # Small 1-line wordmark (size 0)
     grid_small = lines(compose_grid(100, 30, 1.0, st, tips, "4.3.4", logo_style="small"))
-    assert "✦ Hubble" in grid_small[0]
+    assert "▲ Hubble" in grid_small[0]
 
 

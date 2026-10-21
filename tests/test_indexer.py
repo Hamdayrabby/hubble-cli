@@ -191,3 +191,84 @@ def test_symbols_tool(tmp_path: Path):
     out, is_err = run_tool(tool, {"path": ".env"}, ctx)
     assert is_err
     assert "it looks like a secrets file" in out
+
+
+def test_python_syntax_error_fallback():
+    # Intentionally broken Python with unmatched parenthesis
+    broken_code = """class BrokenService:
+    def good_method(self, x):
+        return x
+
+    def broken_syntax(self):
+        this is ( unclosed parenthesis
+
+    async def another_method(self, y):
+        pass
+
+def standalone_func(z):
+    pass
+"""
+    syms = extract_python_symbols(broken_code, "broken.py")
+    names = [s.name for s in syms]
+    assert "BrokenService" in names
+    assert "good_method" in names
+    assert "broken_syntax" in names
+    assert "another_method" in names
+    assert "standalone_func" in names
+
+    # Verify parent attribution
+    method_sym = next(s for s in syms if s.name == "good_method")
+    assert method_sym.kind == "method"
+    assert method_sym.parent == "BrokenService"
+
+    async_sym = next(s for s in syms if s.name == "another_method")
+    assert async_sym.kind == "async method"
+    assert async_sym.parent == "BrokenService"
+
+    func_sym = next(s for s in syms if s.name == "standalone_func")
+    assert func_sym.kind == "def"
+    assert func_sym.parent == ""
+
+
+def test_multiline_signatures_js_go_rust():
+    # Multi-line JS/TS function
+    js_code = """export async function calculateMetrics(
+    userId: string,
+    options: QueryOptions
+): Promise<MetricResult> {
+    return null;
+}
+"""
+    js_syms = extract_js_ts_symbols(js_code, "metrics.ts")
+    assert len(js_syms) == 1
+    assert js_syms[0].name == "calculateMetrics"
+    assert "userId: string" in js_syms[0].signature
+    assert "options: QueryOptions" in js_syms[0].signature
+
+    # Multi-line Go method
+    go_code = """func (s *BatchServer) Process(
+    ctx context.Context,
+    batch []Item,
+) error {
+    return nil
+}
+"""
+    go_syms = extract_go_symbols(go_code, "batch.go")
+    assert len(go_syms) == 1
+    assert go_syms[0].name == "Process"
+    assert go_syms[0].parent == "BatchServer"
+    assert "ctx context.Context" in go_syms[0].signature
+
+    # Multi-line Rust function
+    rs_code = """pub async fn execute_transaction(
+    &mut self,
+    tx: Transaction,
+) -> Result<(), Error> {
+    Ok(())
+}
+"""
+    rs_syms = extract_rust_symbols(rs_code, "tx.rs")
+    assert len(rs_syms) == 1
+    assert rs_syms[0].name == "execute_transaction"
+    assert "&mut self" in rs_syms[0].signature
+

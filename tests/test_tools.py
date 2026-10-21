@@ -308,3 +308,43 @@ def test_docker_sandbox_timeout_kills_by_container_name(ctx, monkeypatch):
     out, err = run_tool(Shell(), {"command": "sleep 999", "timeout": 1}, ctx)
     assert err and "timed out" in out and "sandbox container killed" in out
     assert len(killed) == 1 and killed[0].startswith("hubble-sandbox-")
+
+
+def test_allow_external_reads_permits_read_blocks_write(ctx, tmp_path_factory):
+    ext_dir = tmp_path_factory.mktemp("external")
+    ext_file = ext_dir / "external_log.txt"
+    ext_file.write_text("external session data", encoding="utf-8")
+
+    # With allow_external_reads=False (default for bare ctx), reading outside is blocked
+    out, err = run_tool(ReadFile(), {"path": str(ext_file)}, ctx)
+    assert err and "outside the workspace" in out
+
+    # When enabled, reading outside is allowed
+    ctx.allow_external_reads = True
+    out, err = run_tool(ReadFile(), {"path": str(ext_file)}, ctx)
+    assert not err and "external session data" in out
+
+    # Writing outside is strictly blocked even when allow_external_reads=True
+    out, err = run_tool(WriteFile(), {"path": str(ext_file), "content": "overwrite"}, ctx)
+    assert err and "outside the workspace" in out
+
+
+def test_edit_file_strips_read_file_line_prefixes(ctx):
+    read(ctx, "src/app.py")
+    # Simulate a small model copying line-number prefix '  2 | ' from read_file output
+    out, err = run_tool(EditFile(), {
+        "path": "src/app.py",
+        "old_string": "  2 |     return a + b",
+        "new_string": "  2 |     return a * b"
+    }, ctx)
+    assert not err, out
+    assert "return a * b" in (ctx.root / "src/app.py").read_text(encoding="utf-8")
+
+
+def test_read_file_long_line_not_truncated(ctx):
+    long_line = "x" * 4500
+    (ctx.root / "long.jsonl").write_text(long_line, encoding="utf-8")
+    out, err = run_tool(ReadFile(), {"path": "long.jsonl"}, ctx)
+    assert not err
+    assert "x" * 4500 in out
+

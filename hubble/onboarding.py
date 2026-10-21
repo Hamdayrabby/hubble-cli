@@ -41,7 +41,7 @@ def add_provider_wizard(taken: Iterable[str], first_run: bool = False) -> Option
     """Returns (config, model_ids) after a successful check, or None if cancelled."""
     taken = set(taken)
     if first_run:
-        console.print("[bold cyan]✦ Welcome to Hubble[/bold cyan]\n"
+        console.print("[bold cyan]▲ Welcome to Hubble[/bold cyan]\n"
                       "  No API key is configured yet. Add a provider to start: Claude (Anthropic), or any\n"
                       "  OpenAI-compatible API.\n")
     else:

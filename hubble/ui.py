@@ -1,6 +1,7 @@
 """Terminal rendering: streamed markdown, tool call lines, diffs and approval prompts."""
 
 import json
+import re
 import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -14,7 +15,7 @@ from rich.text import Text
 from hubble.agent import Events, describe_call
 from hubble.board import SubagentBoard
 from hubble.provider import TurnResult, strip_thinking
-from hubble.spinner import start_shimmer
+from hubble.spinner import is_prompt_proxy_active, start_shimmer
 from hubble.tools import Tool, ToolContext
 
 if sys.platform == "win32":
@@ -30,6 +31,8 @@ console = Console(highlight=False)
 err_console = Console(stderr=True, highlight=False)
 
 ACTIVE_THEME = "terminal"
+ASSISTANT_ICON = "🔭"
+ASSISTANT_TITLE = "🔭 Hubble"
 
 
 def apply_theme(name: str):
@@ -42,9 +45,10 @@ def apply_theme(name: str):
 
 
 TOOL_LABELS = {"read_file": "Read", "write_file": "Write", "edit_file": "Edit", "apply_patch": "Patch",
-               "shell": "Shell", "grep": "Search", "glob": "Glob", "list_dir": "List", "symbols": "Symbols",
-               "todo_write": "Todos", "task": "Task", "invoke_subagent": "Subagent",
-               "define_subagent": "Define Subagent", "web_search": "Web Search", "web_fetch": "Fetch"}
+               "shell": "Shell", "manage_task": "Task Supervisor", "grep": "Search", "glob": "Glob",
+               "list_dir": "List", "symbols": "Symbols", "todo_write": "Todos", "task": "Task",
+               "invoke_subagent": "Subagent", "define_subagent": "Define Subagent",
+               "web_search": "Web Search", "web_fetch": "Fetch"}
 MAX_DIFF_LINES = 120
 
 
@@ -52,20 +56,86 @@ def render_diff(diff: str, max_lines: int = MAX_DIFF_LINES) -> Text:
     out = Text()
     lines = diff.splitlines()
     pal = get_palette(ACTIVE_THEME)
+
+    hunk_re = re.compile(r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@(.*)$")
+
     add_style = f"{pal.diff_add_bg} {pal.diff_add_fg}".strip() if pal.diff_add_bg else "green"
     del_style = f"{pal.diff_del_bg} {pal.diff_del_fg}".strip() if pal.diff_del_bg else "red"
-    for line in lines[:max_lines]:
-        if line.startswith(("+++", "---")):
-            style = "bold"
-        elif line.startswith("+"):
-            style = add_style
-        elif line.startswith("-"):
-            style = del_style
-        elif line.startswith("@@"):
-            style = pal.accent or "cyan"
+    gutter_style = pal.diff_num or "dim"
+    sep_style = "dim"
+    accent_style = pal.accent or "cyan"
+
+    old_ln = 0
+    new_ln = 0
+    in_hunk = False
+    displayed = 0
+
+    for line in lines:
+        if displayed >= max_lines:
+            break
+
+        m = hunk_re.match(line)
+        if m:
+            in_hunk = True
+            old_ln = int(m.group(1))
+            new_ln = int(m.group(3))
+            heading = m.group(5).strip()
+            out.append(f"{'':>4} │ {'':>4} │ ", style=gutter_style)
+            out.append(f"@@ -{m.group(1)} +{m.group(3)} @@", style=accent_style)
+            if heading:
+                out.append(f" {heading}", style="dim")
+            out.append("\n")
+            displayed += 1
+            continue
+
+        if line.startswith(("---", "+++")):
+            out.append(line + "\n", style="bold")
+            displayed += 1
+            continue
+
+        if line.startswith("\\"):
+            out.append(f"{'':>4} │ {'':>4} │ {line}\n", style="dim")
+            displayed += 1
+            continue
+
+        if in_hunk:
+            if line.startswith("+"):
+                code = line[1:]
+                out.append(f"{'':>4} ", style=gutter_style)
+                out.append("│", style=sep_style)
+                out.append(f" {new_ln:>4} ", style=gutter_style)
+                out.append("│", style=sep_style)
+                out.append(f" +{code}\n", style=add_style)
+                new_ln += 1
+                displayed += 1
+            elif line.startswith("-"):
+                code = line[1:]
+                out.append(f"{old_ln:>4} ", style=gutter_style)
+                out.append("│", style=sep_style)
+                out.append(f"{'':>4} ", style=gutter_style)
+                out.append("│", style=sep_style)
+                out.append(f" -{code}\n", style=del_style)
+                old_ln += 1
+                displayed += 1
+            else:
+                code = line[1:] if line.startswith(" ") else line
+                out.append(f"{old_ln:>4} ", style=gutter_style)
+                out.append("│", style=sep_style)
+                out.append(f" {new_ln:>4} ", style=gutter_style)
+                out.append("│", style=sep_style)
+                out.append(f"  {code}\n", style="dim")
+                old_ln += 1
+                new_ln += 1
+                displayed += 1
         else:
-            style = "dim"
-        out.append(line + "\n", style=style)
+            if line.startswith("+"):
+                out.append(line + "\n", style=add_style)
+            elif line.startswith("-"):
+                out.append(line + "\n", style=del_style)
+            else:
+                out.append(line + "\n", style="dim")
+            displayed += 1
+
     if len(lines) > max_lines:
         out.append(f"... {len(lines) - max_lines} more diff lines\n", style="dim")
     return out
@@ -114,7 +184,7 @@ class StreamingMarkdown:
         self.live = None
         self._last = 0.0
         self._lock = threading.Lock()
-        self.animate = con.is_terminal
+        self.animate = con.is_terminal and not is_prompt_proxy_active()
 
     # ----- reveal -------------------------------------------------------------
 
@@ -156,11 +226,10 @@ class StreamingMarkdown:
         if cut:
             self._stop_live()
             self._render(chunk)
-        if self.live is None and self.buf.strip() and self.console.is_terminal:
+        if self.animate and self.live is None and self.buf.strip() and self.console.is_terminal and not is_prompt_proxy_active():
             from rich.live import Live
-            from hubble.spinner import Footed
             self._last = time.time()
-            self.live = Live(Footed(_BlockPreview(self)), console=self.console, refresh_per_second=30,
+            self.live = Live(_BlockPreview(self), console=self.console, refresh_per_second=30,
                              transient=True, vertical_overflow="crop")
             self.live.start()
 
@@ -253,11 +322,89 @@ def summarize_output(tool: Tool, output: str, is_error: bool) -> Tuple[str, List
             [h.split(". ", 1)[-1] for h in hits[:3]]
     if tool.name == "web_fetch":
         return f"Fetched {len(output):,} chars", lines[2:3]
-    if tool.name == "task":
+    if tool.name in ("task", "invoke_subagent"):
         cleaned = strip_thinking(output).strip()
         lines = cleaned.splitlines()
         return (f"Report ready ({len(cleaned):,} chars)", lines[:2]) if lines else ("Report ready", [])
     return lines[0][:200] if lines else "done", []
+
+
+class ThinkingAccordion:
+    """Manages the live streaming and collapsed accordion state of model reasoning.
+
+    While streaming:
+      If show_live is True, dynamically updates a single-line preview with elapsed
+      time and estimated token count:
+      ▶ Thinking (1.8s · 340 tok)
+
+    When finished (or upon receiving first answer token / tool call):
+      Collapses cleanly into a single dim line:
+      ▼ Thought for 3.2s (840 tokens)  · /thinking view to inspect
+    """
+
+    def __init__(self, con: Console, show_live: bool = False, theme_name: str = "terminal"):
+        self.console = con
+        self.show_live = show_live
+        self.theme_name = theme_name
+        self.chunks: List[str] = []
+        self.t0 = time.time()
+        self.t1: Optional[float] = None
+        self.collapsed = False
+        self.live = None
+        self._last_snippet = ""
+        self.char_count = 0
+
+    def feed(self, delta: str):
+        if not self.chunks:
+            self.t0 = time.time()
+        self.chunks.append(delta)
+        self.char_count += len(delta)
+        if self.show_live and self.console.is_terminal and not self.collapsed:
+            self._update_live()
+
+    def _update_live(self):
+        if is_prompt_proxy_active():
+            return
+        tokens = int(self.char_count / 3.8)
+        elapsed = time.time() - self.t0
+        pal = get_palette(self.theme_name)
+        icon_col = pal.thought_title or "cyan bold"
+        text = Text()
+        text.append("▶ Thinking ", style=icon_col)
+        text.append(f"({elapsed:.1f}s · {tokens:,} tok)", style="dim")
+        if self.live is None:
+            from rich.live import Live
+            self.live = Live(text, console=self.console, transient=True, refresh_per_second=10)
+            self.live.start()
+        else:
+            self.live.update(text)
+
+    def collapse(self):
+        if self.collapsed:
+            return
+        self.collapsed = True
+        self.t1 = time.time()
+        if self.live is not None:
+            try:
+                self.live.stop()
+            except Exception:
+                pass
+            self.live = None
+        if not self.chunks:
+            return
+        elapsed = (self.t1 or time.time()) - self.t0
+        tokens = int(self.char_count / 3.8)
+        pal = get_palette(self.theme_name)
+        icon_col = pal.thought_title or "cyan"
+        summary = Text()
+        summary.append("▼ Thought for ", style="dim")
+        summary.append(f"{elapsed:.1f}s", style="dim bold")
+        summary.append(f" ({tokens:,} tokens)", style="dim")
+        summary.append("  · /thinking view", style="dim italic")
+        self.console.print(summary)
+
+    def get_full_text(self) -> str:
+        return "".join(self.chunks)
 
 
 class ReplEvents(Events):
@@ -266,6 +413,8 @@ class ReplEvents(Events):
         self.show_reasoning = show_reasoning
         self.reasoning_chars = 0
         self.answer_started = False
+        self.tool_calls_this_turn = 0
+        self.tool_summary_shown = False
         self.md: Optional[StreamingMarkdown] = None
         self.status = None
         self.in_reasoning = False
@@ -273,6 +422,12 @@ class ReplEvents(Events):
         self.batch = 0  # >0 while parallel sub-agents run: the board owns the screen
         self.board: Optional[SubagentBoard] = None
         self.board_live = None
+        self.accordion: Optional[ThinkingAccordion] = None
+        self.last_thinking = ""
+        self.turn_start_time = 0.0
+        self.current_activity: Optional[str] = None
+        self.current_tool: Optional[str] = None
+        self.approval_bridge = None
 
     # ----- sub-agent dashboard ---------------------------------------------
 
@@ -284,23 +439,28 @@ class ReplEvents(Events):
         self.batch = 0
         self._close_board()
 
-    def subagent_start(self, key: str, label: str):
+    def subagent_start(self, key: str, label: str, model: str = "", context_window: int = 0):
         if self.board is None:
-            from rich.live import Live
             self._stop_status(force=True)
-            from hubble.spinner import Footed
             self.board = SubagentBoard()
-            self.board_live = Live(Footed(self.board), console=console, refresh_per_second=12, transient=True)
-            self.board_live.start()
-        self.board.add(key, label)
+            if not is_prompt_proxy_active():
+                try:
+                    from rich.live import Live
+                    self.board_live = Live(self.board, console=console, refresh_per_second=10, transient=True)
+                    self.board_live.start()
+                except Exception:
+                    self.board_live = None
+            else:
+                self.board_live = None
+        self.board.add(key, label, model=model, context_window=context_window)
 
     def subagent_step(self, key: str, action: str, is_tool: bool = True):
         if self.board:
             self.board.step(key, action, is_tool)
 
-    def subagent_tokens(self, key: str, tokens: int):
+    def subagent_tokens(self, key: str, tokens: int, prompt_tokens: int = 0, completion_tokens: int = 0, context_tokens: int = 0):
         if self.board:
-            self.board.tokens(key, tokens)
+            self.board.tokens(key, tokens, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, context_tokens=context_tokens)
 
     def subagent_end(self, key: str, status: str, detail: str = ""):
         if self.board:
@@ -309,16 +469,23 @@ class ReplEvents(Events):
     def _close_board(self):
         """Stop the live board and leave its final state on screen."""
         if self.board_live is not None:
-            self.board_live.stop()
-            console.print(self.board)
+            try:
+                self.board_live.stop()
+            except Exception:
+                pass
             self.board_live = None
+        if self.board is not None:
+            console.print(self.board)
             self.board = None
 
     def _stop_status(self, force: bool = False):
         if (self.batch or self.board_live is not None) and not force:
             return
         if self.status is not None:
-            self.status.stop()
+            try:
+                self.status.stop()
+            except Exception:
+                pass
             self.status = None
 
     def _end_reasoning(self):
@@ -326,80 +493,95 @@ class ReplEvents(Events):
             console.print()
             self.in_reasoning = False
 
+    def _show_tool_summary_if_needed(self):
+        if not self.tool_summary_shown and self.tool_calls_this_turn > 0:
+            count = self.tool_calls_this_turn
+            word = "tool call" if count == 1 else "tool calls"
+            console.print(f"[dim]● {count} {word}[/dim]")
+            self.tool_summary_shown = True
+
     def turn_start(self):
+        self._stop_status(force=True)
+        self.turn_start_time = time.time()
+        self.current_activity = "Thinking..."
         self.md = StreamingMarkdown(console)
         self.reasoning_chars = 0
         self.answer_started = False
+        self.tool_calls_this_turn = 0
+        self.tool_summary_shown = False
         self.status = start_shimmer(console)
+        self.accordion = ThinkingAccordion(console, show_live=self.show_reasoning, theme_name=ACTIVE_THEME)
 
     def reasoning(self, delta: str):
-        if not self.show_reasoning:
-            # Keep the animation running and count the hidden thinking tokens (/thinking shows them).
-            self.reasoning_chars += len(delta)
-            if self.status is not None and hasattr(self.status, "shimmer"):
-                self.status.shimmer.tokens = int(self.reasoning_chars / 3.8)
-            return
-        self._stop_status()
-        if not self.in_reasoning:
-            console.print("[dim italic]* thinking[/dim italic]")
-            self.in_reasoning = True
-        console.print(Text(delta, style="dim italic"), end="")
+        if self.show_reasoning:
+            self._stop_status(force=True)
+        self.current_activity = "Thinking..."
+        self.reasoning_chars += len(delta)
+        if self.accordion:
+            self.accordion.feed(delta)
+        if self.status is not None and hasattr(self.status, "shimmer"):
+            self.status.shimmer.tokens = int(self.reasoning_chars / 3.8)
 
     def text(self, delta: str):
-        self._stop_status()
+        self._stop_status(force=True)
+        self.current_activity = "Generating response..."
+        if self.accordion and not self.accordion.collapsed:
+            self.accordion.collapse()
+            self.last_thinking = self.accordion.get_full_text()
         self._end_reasoning()
         if not self.answer_started:
-            pal = get_palette(ACTIVE_THEME)
-            title_style = pal.assistant_title or "bold #af87ff"
-            console.print()
-            console.print(f"[{title_style}]✻ Hubble[/{title_style}]")
+            self._show_tool_summary_if_needed()
             self.answer_started = True
         if self.md:
             self.md.feed(delta)
 
     def turn_end(self, result: TurnResult):
-        self._stop_status()
+        self._stop_status(force=True)
+        self.current_activity = None
+        self.current_tool = None
+        if self.board is not None:
+            self._close_board()
+        if self.accordion and not self.accordion.collapsed:
+            self.accordion.collapse()
+            self.last_thinking = self.accordion.get_full_text()
         self._end_reasoning()
+        self._show_tool_summary_if_needed()
         if self.md:
             self.md.flush()
             if self.md.printed_any:
                 console.print()
 
     def tool_start(self, tool: Tool, args: Dict[str, Any]):
+        if self.accordion and not self.accordion.collapsed:
+            self.accordion.collapse()
+            self.last_thinking = self.accordion.get_full_text()
         label = TOOL_LABELS.get(tool.name, tool.name)
-        if tool.name == "task":
+        if tool.name in ("task", "invoke_subagent"):
+            self._stop_status(force=True)
             return  # shown on the sub-agent board instead
-        pal = get_palette(ACTIVE_THEME)
-        icon_style = pal.tool_icon or "bold cyan"
-        desc = describe_call(tool, args)
-        target = f" [dim]{escape(desc)}[/dim]" if desc else ""
-        console.print(f"[{icon_style}]●[/{icon_style}] [bold]{label}[/bold]{target}")
-        if tool.kind == "edit" and not self.approved_diff_shown:
-            try:
-                diff = tool.preview(args, self.ctx)
-            except Exception:
-                diff = None
-            if diff and diff.startswith("---"):
-                console.print(render_diff(diff, max_lines=40))
+        self.tool_calls_this_turn += 1
+        self.current_tool = activity_label(tool, args)
+        self.current_activity = self.current_tool
         self.approved_diff_shown = False
         if not self.batch:
-            self.status = start_shimmer(console, activity_label(tool, args))
+            self._stop_status(force=True)
+            self.status = start_shimmer(console, self.current_tool)
 
     def tool_result(self, tool: Tool, args: Dict[str, Any], output: str, is_error: bool):
-        if tool.name == "task" and args:
+        self.current_tool = None
+        self.current_activity = "Processing results..."
+        if tool.name in ("task", "invoke_subagent") and args:
             if not self.batch:
                 self._close_board()  # single sub-agent: its board ends with it
+            self._stop_status(force=True)
             return
-        self._stop_status()
-        if not args and is_error:
-            console.print(f"[bold red]●[/bold red] [bold]{TOOL_LABELS.get(tool.name, tool.name)}[/bold]")
-        headline, extra = summarize_output(tool, output, is_error)
-        if tool.name == "task" and args.get("description"):
-            headline = f"{args['description']}: {headline}"
-        style = "red" if is_error else "dim"
-        console.print(f"  [dim]⎿[/dim]  [{style}]{escape(headline)}[/{style}]")
-        for line in extra:
-            console.print(f"     [dim]• {escape(line[:160])}[/dim]")
+        self._stop_status(force=True)
+        if is_error:
+            headline, extra = summarize_output(tool, output, is_error)
+            if tool.name in ("task", "invoke_subagent") and args.get("description"):
+                headline = f"{args['description']}: {headline}"
+            style = "red"
+            console.print(f"  [red]✘[/red] [{style}]{escape(headline)}[/{style}]")
 
     def notice(self, message: str, level: str = "info"):
         self._stop_status()
@@ -417,39 +599,55 @@ class ReplEvents(Events):
         if paused:
             self.board_live.stop()
         try:
+            bridge = getattr(self, "approval_bridge", None)
+            if bridge is not None:
+                return bridge(tool, args, preview)
             return self._ask(tool, args, preview)
         finally:
             if paused and self.board_live is not None:
                 self.board_live.start()
 
     def _ask(self, tool: Tool, args: Dict[str, Any], preview: Optional[str]) -> Tuple[str, str]:
-        from rich import box
         label = TOOL_LABELS.get(tool.name, tool.name)
         call_desc = describe_call(tool, args)
         title = f"{label} {call_desc}".strip()
-        if tool.kind == "exec":
-            body: Any = Text(preview or args.get("command", ""), style="bold")
+        if preview and preview.startswith("---"):
+            from rich import box
+            console.print(Panel(render_diff(preview), title=f"[bold] {escape(title[:100])} [/bold]",
+                                title_align="left", border_style="dim", box=box.ROUNDED, padding=(0, 1)))
+        elif tool.kind == "exec":
+            cmd = preview or args.get("command", "")
+            console.print(f"  [cyan]$[/cyan] [bold white]{escape(cmd)}[/bold white]")
             if args.get("description"):
-                body = Text.assemble(body, "\n", Text(args["description"], style="dim"))
-        elif preview and preview.startswith("---"):
-            body = render_diff(preview)
+                console.print(f"    [dim]{escape(args['description'])}[/dim]")
         else:
-            p_text = (preview or "").strip()
-            if p_text and p_text != call_desc:
-                body = Text(p_text, style="dim")
-            elif tool.kind == "web":
-                body = Text(f"URL: {call_desc}", style="cyan")
+            if call_desc:
+                console.print(f"  [cyan]●[/cyan] [bold]{label}[/bold] [dim]{escape(call_desc)}[/dim]")
             else:
-                body = Text(call_desc or label, style="dim")
-        console.print(Panel(body, title=f"[bold yellow] {escape(title[:100])} [/bold yellow]",
-                            title_align="left", border_style="yellow", box=box.ROUNDED, padding=(0, 1)))
+                console.print(f"  [cyan]●[/cyan] [bold]{label}[/bold]")
         always = {"edit": "edits", "web": tool.target(args), "mcp": tool.target(args)}.get(
             tool.kind, _command_family(args.get("command", "")))
-        question = {"exec": "Run this command?", "edit": "Make this change?", "web": "Fetch this page?"}.get(
+        question = {"exec": "Run this command?", "edit": "Make this change?", "web": f"Fetch {always}?" if always else "Fetch this page?"}.get(
             tool.kind, f"Allow {label}?")
+        can_stage_hunks = False
+        patch_hunks: List[str] = []
+        if tool.name == "apply_patch" and args.get("patch"):
+            try:
+                from hubble.tools import split_patch_into_hunks
+                patch_hunks = split_patch_into_hunks(args["patch"])
+                if len(patch_hunks) > 1:
+                    can_stage_hunks = True
+            except Exception:
+                pass
+
         if sys.stdin.isatty() and console.is_terminal:
-            choice = choose(question, ["Yes", f"Yes, and don't ask again for {always} this session",
-                                       "No, and tell the model what to do instead"], esc_index=2)
+            options = ["Yes", f"Yes, and don't ask again for {always} this session"]
+            if can_stage_hunks:
+                options.append(f"Select individual hunks to stage ({len(patch_hunks)} hunks available)")
+            options.append("No, and tell the model what to do instead")
+            esc_idx = len(options) - 1
+
+            choice = choose(question, options, esc_index=esc_idx)
             if choice is None:
                 raise KeyboardInterrupt  # Ctrl+C: stop the whole turn
             if choice == 0:
@@ -460,11 +658,38 @@ class ReplEvents(Events):
                 self.approved_diff_shown = True
                 console.print(f"  [green]✔[/green] [dim]allowed; won't ask again for {escape(always)} this session[/dim]")
                 return "always", ""
+            if can_stage_hunks and choice == 2:
+                selected_indices = []
+                console.print(f"\n[bold cyan]Interactive Hunk Staging for {escape(args.get('path', 'file'))} ({len(patch_hunks)} hunks):[/bold cyan]")
+                for idx, hunk_str in enumerate(patch_hunks):
+                    console.print(Panel(render_diff(hunk_str), title=f"[bold]Hunk {idx + 1} of {len(patch_hunks)}[/bold]", border_style="cyan"))
+                    hunk_choice = choose(f"Stage hunk {idx + 1}?", ["Stage this hunk", "Skip this hunk", "Stage all remaining hunks", "Discard all remaining hunks"], esc_index=3)
+                    if hunk_choice == 0:
+                        selected_indices.append(idx)
+                        console.print(f"  [green]✔[/green] Hunk {idx + 1} staged")
+                    elif hunk_choice == 1:
+                        console.print(f"  [yellow]○[/yellow] Hunk {idx + 1} skipped")
+                    elif hunk_choice == 2:
+                        selected_indices.extend(range(idx, len(patch_hunks)))
+                        console.print(f"  [green]✔[/green] Staged all remaining hunks ({idx + 1} to {len(patch_hunks)})")
+                        break
+                    else:
+                        console.print(f"  [red]✘[/red] Discarded remaining hunks")
+                        break
+                if selected_indices:
+                    args["selected_hunks"] = selected_indices
+                    console.print(f"  [green]✔[/green] Staging {len(selected_indices)} of {len(patch_hunks)} hunks")
+                    self.approved_diff_shown = True
+                    return "yes", ""
+                else:
+                    console.print("  [yellow]○[/yellow] No hunks staged.")
+                    return "no", "User skipped all hunks during interactive hunk staging."
             feedback = ask_line("  Tell the model what to do instead (Enter to just say no): ")
             console.print("  [red]✘[/red] [dim]denied" + (f": {escape(feedback)}" if feedback else "") + "[/dim]")
             return "no", feedback
         # Not an interactive terminal (piped input): the plain typed answer.
-        console.print(f"  [bold]y[/bold] yes   [bold]a[/bold] always ({escape(always)} this session)   "
+        hunk_hint = "   [bold]s[/bold] stage hunks" if can_stage_hunks else ""
+        console.print(f"  [bold]y[/bold] yes   [bold]a[/bold] always ({escape(always)} this session){hunk_hint}   "
                       f"[bold]n[/bold] no, tell the model why   [dim]Ctrl+C stop[/dim]")
         while True:
             try:
@@ -477,6 +702,18 @@ class ReplEvents(Events):
             if answer in ("a", "always"):
                 self.approved_diff_shown = True
                 return "always", ""
+            if can_stage_hunks and answer in ("s", "stage"):
+                try:
+                    raw_hunks = console.input(f"[dim]  comma-separated 1-based hunk indices to stage (1-{len(patch_hunks)}): [/dim]").strip()
+                    picked = [int(p.strip()) - 1 for p in raw_hunks.split(",") if p.strip().isdigit()]
+                    picked = [i for i in picked if 0 <= i < len(patch_hunks)]
+                    if picked:
+                        args["selected_hunks"] = picked
+                        self.approved_diff_shown = True
+                        return "yes", ""
+                except Exception:
+                    pass
+                return "no", "Hunk staging cancelled."
             if answer in ("n", "no"):
                 try:
                     feedback = console.input("[dim]  feedback for the model (optional): [/dim]").strip()
@@ -485,7 +722,7 @@ class ReplEvents(Events):
                 return "no", feedback
             if answer.startswith("n "):
                 return "no", answer[2:].strip()
-            console.print("[dim]  type y, a or n[/dim]")
+            console.print(f"[dim]  type y, a{', s' if can_stage_hunks else ''} or n[/dim]")
 
 
 def render_todos(todos: List[Dict[str, str]]):
@@ -504,7 +741,7 @@ def render_todos(todos: List[Dict[str, str]]):
 class HeadlessEvents(Events):
     """For `-p`: answer text on stdout (text format), progress on stderr, approvals denied."""
 
-    def __init__(self, stream_text: bool, quiet: bool = False):
+    def __init__(self, stream_text: bool = False, quiet: bool = False):
         self.stream_text = stream_text
         self.quiet = quiet
 
@@ -608,18 +845,38 @@ def _command_family(command: str) -> str:
     return f"`{prefix}` commands"
 
 
+def _render_choose_items(question: str, options: List[str], selected_idx: int = 0,
+                        esc_index: Optional[int] = None) -> Any:
+    from prompt_toolkit.formatted_text import FormattedText
+    out = [("bold", f" {question}\n\n")]
+    for i, opt in enumerate(options):
+        sel = i == selected_idx
+        prefix = " ❯ " if sel else "   "
+        style = "bold #00d7ff" if sel else ""
+        out.append((style, f"{prefix}{i + 1}. {opt}"))
+        if i == esc_index:
+            out.append(("fg:ansigray", "  (esc)\n"))
+        else:
+            out.append(("", "\n"))
+    out.append(("", "\n"))
+    out.append(("fg:ansigray", "  Enter to select · 1-9 to choose · Esc to cancel · Ctrl+C to stop"))
+    return FormattedText(out)
+
+
 def choose(question: str, options: List[str], esc_index: Optional[int] = None) -> Optional[int]:
     """A small inline menu like other agent CLIs:
 
          Run this command?
+
        ❯ 1. Yes
          2. Yes, and don't ask again for `pytest` commands this session
          3. No, and tell the model what to do instead  (esc)
 
-    ↑/↓ then Enter, or press the number to answer at once. Esc picks `esc_index`; Ctrl+C returns
+       Enter to select · 1-9 to choose · Esc to cancel · Ctrl+C to stop
+
+    Enter or 1-9 to choose. Esc picks `esc_index`; Ctrl+C returns
     None (the caller treats it as "stop the turn")."""
     from prompt_toolkit.application import Application
-    from prompt_toolkit.formatted_text import FormattedText
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.layout import Layout, Window
     from prompt_toolkit.layout.controls import FormattedTextControl
@@ -627,13 +884,7 @@ def choose(question: str, options: List[str], esc_index: Optional[int] = None) -
     state = {"idx": 0}
 
     def render():
-        out = [("bold", f" {question}\n")]
-        for i, opt in enumerate(options):
-            sel = i == state["idx"]
-            out.append(("fg:#00d7ff bold" if sel else "", f" {'❯' if sel else ' '} {i + 1}. {opt}"))
-            out.append(("fg:ansigray", "  (esc)\n" if i == esc_index else "\n"))
-        out.append(("fg:ansigray", "   ↑↓ move · Enter or 1-9 choose · Ctrl+C stop the turn"))
-        return FormattedText(out)
+        return _render_choose_items(question, options, state["idx"], esc_index)
 
     kb = KeyBindings()
 

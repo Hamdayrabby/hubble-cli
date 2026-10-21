@@ -17,7 +17,7 @@ VERBS = [
     "Drifting through code", "Collecting photons", "Warping", "Consulting the stars", "Tuning the antenna",
     "Surveying galaxies", "Cogitating", "Tinkering", "Noodling", "Contemplating", "Launching probes",
 ]
-GLYPHS = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"]
+GLYPHS = ["🔭", "✦", "✧", "⌾", "◎", "◇", "◈", "◆", "✦", "🔭"]
 
 # Warm shimmer palette: base, near highlight, highlight.
 BASE, NEAR, PEAK = "#d7875f", "#ffaf87", "bold #ffe7d7"
@@ -56,6 +56,27 @@ class Shimmer:
         out.append(f"  ({' · '.join(details)})", style="dim")
         return out
 
+    def to_formatted_text(self):
+        """Build formatted text tuples for prompt_toolkit with the exact Hubble shimmer wave."""
+        t = time.time() - self.start
+        glyph = GLYPHS[int(t * 10) % len(GLYPHS)]
+        words = (self.label or VERBS[(int(t / 3.5) + self._offset) % len(VERBS)]) + "…"
+        sweep = len(words) + 10
+        pos = (t * 16) % sweep - 5
+        frags = [("fg:#ff875f bold", f"{glyph} ")]
+        for i, ch in enumerate(words):
+            d = abs(i - pos)
+            style = "fg:#ffe7d7 bold" if d < 1.2 else "fg:#ffaf87" if d < 3 else "fg:#d7875f"
+            frags.append((style, ch))
+        if self.details:
+            details = [f"{int(t)}s"]
+            if self.tokens:
+                details.append(f"↓ {self.tokens:,} tokens")
+            if self.hint:
+                details.append(self.hint)
+            frags.append(("fg:#6c6c80", f"  ({' · '.join(details)})"))
+        return frags
+
 
 # Set by the REPL: returns a one-line status (model, context, tokens) or None. Every live display
 # during a run (spinner, sub-agent board, streaming text) draws it underneath itself, so the
@@ -85,9 +106,29 @@ class Footed:
         return Group(self.inner, Text(""), footer)
 
 
+def is_prompt_proxy_active() -> bool:
+    """True when running inside prompt_toolkit's patch_stdout context."""
+    import sys
+    try:
+        from prompt_toolkit.patch_stdout import StdoutProxy
+        return isinstance(sys.stdout, StdoutProxy)
+    except Exception:
+        return False
+
+
+_ACTIVE_SHIMMER: Optional["ShimmerLive"] = None
+
+
 def start_shimmer(console, label: Optional[str] = None) -> "ShimmerLive":
+    global _ACTIVE_SHIMMER
+    if _ACTIVE_SHIMMER is not None:
+        try:
+            _ACTIVE_SHIMMER.stop()
+        except Exception:
+            pass
     live = ShimmerLive(Shimmer(label), console)
     live.start()
+    _ACTIVE_SHIMMER = live
     return live
 
 
@@ -96,10 +137,28 @@ class ShimmerLive:
 
     def __init__(self, shimmer: Shimmer, console):
         self.shimmer = shimmer
-        self.live = Live(Footed(shimmer), console=console, refresh_per_second=15, transient=True)
+        self._stopped = False
+        if not is_prompt_proxy_active():
+            self.live = Live(Footed(shimmer), console=console, refresh_per_second=15, transient=True)
+        else:
+            self.live = None
 
     def start(self):
-        self.live.start()
+        if not self._stopped and self.live is not None:
+            try:
+                self.live.start()
+            except Exception:
+                pass
 
     def stop(self):
-        self.live.stop()
+        global _ACTIVE_SHIMMER
+        if _ACTIVE_SHIMMER is self:
+            _ACTIVE_SHIMMER = None
+        if self._stopped:
+            return
+        self._stopped = True
+        if self.live is not None:
+            try:
+                self.live.stop()
+            except Exception:
+                pass
