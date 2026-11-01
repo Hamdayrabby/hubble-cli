@@ -36,6 +36,14 @@ def _coordinator(repo, fake):
     return Coordinator(repo, reg)
 
 
+def test_parse_changed_files_handles_quotes_and_renames():
+    from hubble.orchestration.coordinator import parse_changed_files
+    assert parse_changed_files(' M app.py\n?? new.py\n') == ["app.py", "new.py"]
+    assert parse_changed_files(' M "my file.py"\n') == ["my file.py"]
+    assert parse_changed_files('R  old.py -> new.py\n') == ["new.py"]
+    assert parse_changed_files('') == []
+
+
 def test_writer_gets_worktree_and_base_sha(repo):
     coord = _coordinator(repo, FakeAdapter())
     record = coord.execute(Task("impl", "change things", required_capabilities=["one_shot"]))

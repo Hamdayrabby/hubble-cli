@@ -18,6 +18,21 @@ from hubble.runtimes.protocol import RunSpec
 from hubble.runtimes.registry import RuntimeRegistry
 from hubble.runs.store import RunRecord
 
+
+
+def parse_changed_files(porcelain: str) -> List[str]:
+    """Porcelain v1 -> paths. Handles quoted paths and renames."""
+    out: List[str] = []
+    for line in porcelain.splitlines():
+        if not line.strip():
+            continue
+        path = line[3:] if len(line) > 3 else ""
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        path = path.strip().strip('"')
+        if path:
+            out.append(path)
+    return out
 WRITER_TYPES = ("implementation",)
 
 
@@ -96,7 +111,7 @@ class Coordinator:
                     record.failure_class = classify(exit_code=exit_code) or "test_failure"
             if wt_name:
                 status = worktree.status(cwd)
-                record.changed_files = [ln[3:] for ln in status["dirty"].splitlines() if ln.strip()]
+                record.changed_files = parse_changed_files(status["dirty"])
                 record.detail.setdefault("porcelain", status["dirty"][:4000])
                 record.detail.setdefault("diffstat", status["diffstat"][:2000])
         except Exception as exc:  # adapter/registry/worktree errors stay visible
