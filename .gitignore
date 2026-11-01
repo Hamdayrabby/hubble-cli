@@ -22,6 +22,7 @@ chat_*.md
 build/
 dist/
 .pytest_cache/
+pytest-of-*/
 
 # Editor/OS
 .idea/
