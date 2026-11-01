@@ -16,10 +16,17 @@ from typing import Dict, Iterator, List, Optional
 class ProcRun:
     def __init__(self, argv: List[str], cwd: Path, env: Dict[str, str]):
         self.argv = argv
+        # Own the child console lifecycle: a Ctrl+C aimed at the operator's
+        # console must not propagate into the harness (STATUS_CONTROL_C_EXIT).
+        # Termination stays explicit through kill_tree; same pattern as
+        # hubble/process.py ProcessManager.start_task.
+        group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+                 if sys.platform == "win32" else {"start_new_session": True})
         self.proc = subprocess.Popen(
             argv, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace", bufsize=1,
+            **group,
         )
         self.lines: List[str] = []
         self._lock = threading.Lock()
