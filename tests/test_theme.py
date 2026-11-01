@@ -19,6 +19,7 @@ def test_theme_registry():
         "solarized dark",
         "colorblind-friendly dark",
         "tokyo night",
+        "black",
     ]
     assert ORDERED_SCHEMES == expected
     for name in expected:
@@ -75,16 +76,16 @@ def test_get_prompt_style():
     # Default terminal prompt style
     style_term = get_prompt_style("terminal")
     assert "" in style_term
-    assert style_term[""] == "#00d7ff"
+    assert style_term[""] == "#ffffff"
     assert "prompt" in style_term
-    assert style_term["prompt"] == "bold #00d7ff"
+    assert style_term["prompt"] == "bold #ffd75f"
     assert "completion-menu" in style_term
     assert "completion-menu.completion.current" in style_term
     assert "scrollbar.button" in style_term
     assert "bottom-toolbar" in style_term
     # Terminal menu is dark slate (not white/grey)
     assert "#161b22" in style_term["completion-menu"]
-    assert "#58a6ff" in style_term["completion-menu.completion.current"]
+    assert "#ffd75f" in style_term["completion-menu.completion.current"]
 
     # Tokyo Night prompt style
     style_tokyo = get_prompt_style("tokyo night")

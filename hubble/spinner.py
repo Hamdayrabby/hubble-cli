@@ -20,8 +20,8 @@ VERBS = [
 GLYPHS = ["🔭", "✦", "✧", "⌾", "◎", "◇", "◈", "◆", "✦", "🔭"]
 
 # Warm shimmer palette: base, near highlight, highlight.
-BASE, NEAR, PEAK = "#d7875f", "#ffaf87", "bold #ffe7d7"
-GLYPH_STYLE = "bold #ff875f"
+BASE, NEAR, PEAK = "#d7b055", "#ffe08a", "bold #fff7d6"
+GLYPH_STYLE = "bold #ffd75f"
 
 
 class Shimmer:
@@ -63,10 +63,10 @@ class Shimmer:
         words = (self.label or VERBS[(int(t / 3.5) + self._offset) % len(VERBS)]) + "…"
         sweep = len(words) + 10
         pos = (t * 16) % sweep - 5
-        frags = [("fg:#ff875f bold", f"{glyph} ")]
+        frags = [("fg:#ffd75f bold", f"{glyph} ")]
         for i, ch in enumerate(words):
             d = abs(i - pos)
-            style = "fg:#ffe7d7 bold" if d < 1.2 else "fg:#ffaf87" if d < 3 else "fg:#d7875f"
+            style = "fg:#fff7d6 bold" if d < 1.2 else "fg:#ffe08a" if d < 3 else "fg:#d7b055"
             frags.append((style, ch))
         if self.details:
             details = [f"{int(t)}s"]
@@ -74,7 +74,7 @@ class Shimmer:
                 details.append(f"↓ {self.tokens:,} tokens")
             if self.hint:
                 details.append(self.hint)
-            frags.append(("fg:#6c6c80", f"  ({' · '.join(details)})"))
+            frags.append(("fg:#8a8a8a", f"  ({' · '.join(details)})"))
         return frags
 
 

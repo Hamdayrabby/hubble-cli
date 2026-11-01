@@ -37,7 +37,7 @@ class AgentDef:
     tools: Optional[List[str]] = None
     model: str = ""
     capability: str = "read_only"    # read_only | edit
-    color: str = ""                  # e.g. 'cyan', 'magenta', 'green', 'yellow', 'blue', 'red', 'purple', 'orange'
+    color: str = ""                  # e.g. 'yellow', 'green', 'orange', 'red' (warm default palette)
     fork_context: bool = False       # whether this agent forks parent conversation history
     extra: dict = field(default_factory=dict)
 
@@ -55,7 +55,7 @@ BUILTIN_AGENTS: dict = {
         scope="builtin",
         tools=["read_file", "grep", "glob", "list_dir", "symbols", "web_search", "web_fetch"],
         capability="read_only",
-        color="cyan",
+        color="yellow",
     ),
     "self": AgentDef(
         name="self",
@@ -68,7 +68,7 @@ BUILTIN_AGENTS: dict = {
         path=Path("builtin/self.md"),
         scope="builtin",
         capability="edit",
-        color="magenta",
+        color="green",
     ),
     "code-reviewer": AgentDef(
         name="code-reviewer",
@@ -184,7 +184,7 @@ name: {name}
 description: What this agent is for and WHEN to use it (the main agent picks agents by this line).
 # tools: read_file, grep, glob, list_dir      # optional: restrict its tools
 # model: some-model-id                        # optional: run it on a different model
-# color: cyan                                 # optional: cyan, magenta, green, yellow, blue, red, purple, orange
+# color: yellow                                # optional: yellow, green, orange, red, blue, purple
 # fork_context: false                         # optional: set true to fork parent conversation history
 capability: read_only                         # read_only or edit
 ---

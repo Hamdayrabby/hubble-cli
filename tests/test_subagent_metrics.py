@@ -222,7 +222,7 @@ def test_subagent_claude_preloader_and_prompt_proxy_no_live():
 
     # Check for Claude glyph
     assert any(g in texts[0] for g in CLAUDE_GLYPHS)
-    assert "fg:#00d7ff bold" in styles[0]
+    assert "fg:#ffd75f bold" in styles[0]
     assert "1 subagent running" in combined_text
     assert "Research hubble cli projects" in combined_text
     assert "1 tool" in combined_text

@@ -134,19 +134,19 @@ class SubagentBoard:
         if len(rows) == 1:
             r = rows[0]
             glyph = CLAUDE_GLYPHS[frame % len(CLAUDE_GLYPHS)]
-            frags.append(("fg:#00d7ff bold", f"{glyph} "))
+            frags.append(("fg:#ffd75f bold", f"{glyph} "))
             tag = f"{running} subagent running"
-            frags.append(("fg:#c084fc bold", tag))
-            frags.append(("fg:#6c6c80", " · "))
+            frags.append(("fg:#ffe08a bold", tag))
+            frags.append(("fg:#8a8a8a", " · "))
             frags.append(("bold", f"{r.label}"))
             stats = f" · {r.tools} tool{'s' if r.tools != 1 else ''} · {_fmt_tokens(r.tokens)} tok · {int(r.elapsed)}s · "
-            frags.append(("fg:#6c6c80", stats))
+            frags.append(("fg:#8a8a8a", stats))
             act = r.action or "running..."
             used_len = 2 + len(tag) + 3 + len(r.label) + len(stats)
             avail = max(35, cols - used_len - 3)
             if len(act) > avail:
                 act = act[:avail - 1] + "…"
-            frags.append(("fg:#00d7ff", act))
+            frags.append(("fg:#ffd75f", act))
             return frags
 
         # Multi-subagent orchestration
@@ -154,32 +154,32 @@ class SubagentBoard:
         elapsed = int(time.time() - self.start)
         header_tag = f"Orchestrating {total} subagents"
         header_stats = f" ({running} running · {done} done · {elapsed}s)"
-        frags.append(("fg:#00d7ff bold", f"{header_glyph} "))
-        frags.append(("fg:#c084fc bold", header_tag))
-        frags.append(("fg:#6c6c80", header_stats))
+        frags.append(("fg:#ffd75f bold", f"{header_glyph} "))
+        frags.append(("fg:#ffe08a bold", header_tag))
+        frags.append(("fg:#8a8a8a", header_stats))
 
         for i, r in enumerate(rows):
             frags.append(("", "\n"))
             if r.status == "running":
                 glyph = CLAUDE_GLYPHS[(frame + i * 3) % len(CLAUDE_GLYPHS)]
-                frags.append(("fg:#00d7ff bold", f"  {glyph} "))
+                frags.append(("fg:#ffd75f bold", f"  {glyph} "))
                 frags.append(("bold", f"{r.label}"))
                 stats = f" · {r.tools} tool{'s' if r.tools != 1 else ''} · {_fmt_tokens(r.tokens)} tok · {int(r.elapsed)}s · "
-                frags.append(("fg:#6c6c80", stats))
+                frags.append(("fg:#8a8a8a", stats))
                 act = r.action or "running..."
                 used_len = 4 + len(r.label) + len(stats)
                 avail = max(25, cols - used_len - 3)
                 if len(act) > avail:
                     act = act[:avail - 1] + "…"
-                frags.append(("fg:#00d7ff", act))
+                frags.append(("fg:#ffd75f", act))
             else:
                 ch, _ = STATUS_ICON.get(r.status, ("•", "dim"))
                 style_pt = "fg:#50fa7b bold" if r.status == "done" else "fg:#ff5555 bold" if r.status == "failed" else "fg:#f1fa8c bold"
                 frags.append((style_pt, f"  {ch} "))
                 frags.append(("bold" if r.status == "done" else "", f"{r.label}"))
                 stats = f" · {r.tools} tool{'s' if r.tools != 1 else ''} · {_fmt_tokens(r.tokens)} tok · {int(r.elapsed)}s · "
-                frags.append(("fg:#6c6c80", stats))
-                frags.append(("fg:#ff5555" if r.status == "failed" else "fg:#6c6c80", r.detail or r.status))
+                frags.append(("fg:#8a8a8a", stats))
+                frags.append(("fg:#ff5555" if r.status == "failed" else "fg:#8a8a8a", r.detail or r.status))
         return frags
 
     def __rich__(self):
@@ -196,7 +196,7 @@ class SubagentBoard:
         else:
             ok = sum(r.status == "done" for r in rows)
             partial = sum(r.status == "partial" for r in rows)
-            head = Text.assemble(("● ", "bold magenta"),
+            head = Text.assemble(("● ", "bold yellow"),
                                  (f"{len(rows)} sub-agent{'s' if len(rows) != 1 else ''} finished", "bold"),
                                  (f"  {ok}/{len(rows)} succeeded" + (f", {partial} partial" if partial else "")
                                   + f" · {elapsed}s", "dim"))
@@ -210,8 +210,8 @@ class SubagentBoard:
         frame = int(time.time() * 10)
         for i, r in enumerate(rows):
             if r.status == "running":
-                icon = Text("  " + CLAUDE_GLYPHS[(frame + i * 3) % len(CLAUDE_GLYPHS)], style="bold #00d7ff")
-                action = Text(r.action, style="#00d7ff" if any(w in r.action.lower() for w in ("searching", "reading", "fetching", "thinking", "symbols", "running")) else "#d7875f")
+                icon = Text("  " + CLAUDE_GLYPHS[(frame + i * 3) % len(CLAUDE_GLYPHS)], style="bold #ffd75f")
+                action = Text(r.action, style="#ffd75f" if any(w in r.action.lower() for w in ("searching", "reading", "fetching", "thinking", "symbols", "running")) else "#d7875f")
                 label = Text(r.label, style="bold")
             else:
                 ch, style = STATUS_ICON.get(r.status, ("•", "dim"))

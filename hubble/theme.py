@@ -9,6 +9,7 @@ Schemes:
   - solarized dark (Solarized Dark)
   - colorblind-friendly dark (accessible high-contrast palette)
   - tokyo night (Tokyo Night vibrant neon/dark palette)
+  - black (true black like OpenCode: the terminal's default background is retuned via OSC 11)
 """
 
 from dataclasses import dataclass
@@ -18,6 +19,19 @@ from rich.theme import Theme
 
 ASSISTANT_ICON = "🔭"
 ASSISTANT_TITLE = "🔭 Hubble"
+
+CONTENT_MAX = 100   # width of the centered content column (panel, transcript, info rows)
+
+
+def content_margins(cols=None) -> Tuple[int, int]:
+    """(left margin, content width) that centers a `CONTENT_MAX`-wide column in the terminal."""
+    try:
+        import shutil
+        cols = int(cols or shutil.get_terminal_size((80, 24)).columns)
+    except Exception:
+        cols = 80
+    width = max(40, min(cols, CONTENT_MAX))
+    return max(0, (cols - width) // 2), width
 
 
 @dataclass
@@ -54,7 +68,7 @@ class ColorPalette:
     menu_meta_bg: str = "#161b22"
     menu_meta_fg: str = "#8b949e"
     menu_sel_bg: str = "#21262d"
-    menu_sel_fg: str = "#58a6ff bold"
+    menu_sel_fg: str = "#ffd75f bold"
     menu_sel_meta_bg: str = "#21262d"
     menu_sel_meta_fg: str = "#c9d1d9"
     scrollbar_bg: str = "#161b22"
@@ -66,8 +80,8 @@ COLOR_SCHEMES: Dict[str, ColorPalette] = {
         name="terminal",
         description="Default terminal palette",
         border="ansigray",
-        user_prefix="bold #00d7ff",
-        user_text="#00d7ff",
+        user_prefix="bold #ffd75f",
+        user_text="#ffffff",
         assistant_title="ansigreen bold",
         diff_add_bg="bg:#1a3a22",
         diff_add_fg="ansigreen",
@@ -79,12 +93,12 @@ COLOR_SCHEMES: Dict[str, ColorPalette] = {
         thought_text="ansigray italic",
         tool_icon="ansiyellow",
         tool_text="",
-        task_icon="ansimagenta",
+        task_icon="ansiyellow",
         task_text="",
         error="ansired bold",
         warning="ansiyellow bold",
-        link="ansicyan underline",
-        accent="ansiblue bold",
+        link="ansiyellow underline",
+        accent="ansiyellow bold",
         dim="ansigray",
         code_theme="monokai",
         menu_bg="#161b22",
@@ -92,7 +106,7 @@ COLOR_SCHEMES: Dict[str, ColorPalette] = {
         menu_meta_bg="#161b22",
         menu_meta_fg="#8b949e",
         menu_sel_bg="#21262d",
-        menu_sel_fg="#58a6ff bold",
+        menu_sel_fg="#ffd75f bold",
         menu_sel_meta_bg="#21262d",
         menu_sel_meta_fg="#c9d1d9",
         scrollbar_bg="#161b22",
@@ -350,6 +364,42 @@ COLOR_SCHEMES: Dict[str, ColorPalette] = {
         scrollbar_bg="#16161e",
         scrollbar_thumb="#414868",
     ),
+    "black": ColorPalette(
+        name="black",
+        description="True black background like OpenCode (OLED-friendly)",
+        border="#333333",
+        user_prefix="#ffffff bold",
+        user_text="#ffffff",
+        assistant_title="#00ff88 bold",
+        diff_add_bg="bg:#0d2515",
+        diff_add_fg="#00ff88",
+        diff_del_bg="bg:#2d0a0a",
+        diff_del_fg="#ff4444",
+        diff_num="#666666",
+        diff_code="#cccccc",
+        thought_title="#888888 bold",
+        thought_text="#888888 italic",
+        tool_icon="#ffaa00",
+        tool_text="#cccccc",
+        task_icon="#aa88ff",
+        task_text="#cccccc",
+        error="#ff4444 bold",
+        warning="#ffaa00 bold",
+        link="#00aaff underline",
+        accent="#ffffff bold",
+        dim="#666666",
+        code_theme="monokai",
+        menu_bg="#0d0d0d",          # the prompt box: a subtle raised panel on the true-black page
+        menu_fg="#ffffff",
+        menu_meta_bg="#0d0d0d",
+        menu_meta_fg="#888888",
+        menu_sel_bg="#1a1a1a",
+        menu_sel_fg="#ffffff bold",
+        menu_sel_meta_bg="#1a1a1a",
+        menu_sel_meta_fg="#cccccc",
+        scrollbar_bg="#000000",
+        scrollbar_thumb="#333333",
+    ),
 }
 
 ORDERED_SCHEMES = [
@@ -361,6 +411,7 @@ ORDERED_SCHEMES = [
     "solarized dark",
     "colorblind-friendly dark",
     "tokyo night",
+    "black",
 ]
 
 
@@ -393,23 +444,82 @@ def get_rich_theme(name: Optional[str] = None) -> Theme:
     })
 
 
+def _accent_plain(p: "ColorPalette") -> str:
+    """Accent color without the bold weight (for panel bars, markers and cursors)."""
+    return (p.accent or "").replace(" bold", "").strip() or "#ffd75f"
+
+
+def _box_styles(p: "ColorPalette") -> Dict[str, str]:
+    """prompt_toolkit classes for the OpenCode-style prompt panel: a raised dark
+    background block with a left accent bar, metadata row and footer row."""
+    bg, fg = p.menu_bg, p.menu_fg
+    bar = _accent_plain(p)
+    return {
+        "box.bg": f"bg:{bg} {fg}",
+        "box.fill": f"bg:{bg}",                                 # bg-only fill (keeps text colors)
+        "box.bar": f"bg:{bg} {bar}",
+        "box.cbar": p.border,                                  # the ▁ cap under the panel
+        "box.sep": f"bg:{bg} #444444",
+        "box.dim": f"bg:{bg} {p.dim}",                          # provider, labels, placeholder
+        "box.model": f"bg:{bg} bold {fg}",
+        "box.warn": f"bg:{bg} {p.warning}",                     # context nearly full, queue
+        "box.val": f"bg:{bg} #b8b8b8",
+        "box.in": f"bg:{bg} #ffd75f", "box.out": f"bg:{bg} #87d7af", "box.speed": f"bg:{bg} #5fd7af",
+        "box.mode-default": f"bg:{bg} bold {bar}",
+        "box.mode-accept-edits": f"bg:{bg} bold #5fd787",
+        "box.mode-plan": f"bg:{bg} bold #ffd75f",
+        "box.mode-yolo": f"bg:{bg} bold #ff5f5f",
+        # Footer row (below the panel, on the terminal background)
+        "ft.dir": p.dim,
+        "ft.hint": p.menu_meta_fg,
+    }
+
+
+def get_dialog_style(name: Optional[str] = None) -> Dict[str, str]:
+    """prompt_toolkit classes for OpenCode-style dialog popups (model picker and friends):
+    a raised panel with a title row, search field, accent-highlighted active row and
+    right-aligned meta badges."""
+    p = get_palette(name)
+    accent = _accent_plain(p)
+    return {
+        "": "",
+        "dlg.bg": f"bg:{p.menu_bg} {p.menu_fg}",
+        "dlg.title": f"bg:{p.menu_bg} bold {p.menu_fg}",
+        "dlg.esc": f"bg:{p.menu_bg} {p.dim}",
+        "dlg.row": f"bg:{p.menu_bg} {p.menu_fg}",
+        "dlg.meta": f"bg:{p.menu_bg} {p.menu_meta_fg}",          # right-aligned badges
+        "dlg.dim": f"bg:{p.menu_bg} {p.dim}",
+        "dlg.mark": f"bg:{p.menu_bg} {accent}",                  # ● marker on the current row
+        "dlg.mark-dim": f"bg:{p.menu_bg} {p.border}",            # › search caret
+        "dlg.sel": f"bg:{p.menu_sel_bg} {p.menu_sel_fg}",        # active row (accent, bold)
+        "dlg.sel-meta": f"bg:{p.menu_sel_bg} {p.menu_sel_meta_fg}",
+        "dlg.hint": f"bg:{p.menu_bg} {p.dim}",
+        "dlg.hint-key": f"bg:{p.menu_bg} {p.menu_meta_fg}",
+        "cursor": f"bg:{p.menu_fg} fg:{p.menu_bg}",              # search-field caret
+    }
+
+
 def get_prompt_style(name: Optional[str] = None) -> Dict[str, str]:
     """Build prompt_toolkit style mapping for bottom toolbar, dark completion menus, and scrollbars."""
     p = get_palette(name)
     return {
-        # User input text styling and prompt styling (Antigravity cyan prompt and distinctive user input color)
-        "": p.user_text or "#00d7ff",
-        "prompt": p.user_prefix or "bold #00d7ff",
-        "prompt b": p.user_prefix or "bold #00d7ff",
+        # User input text styling and prompt styling (white input on the raised box, warm
+        # yellow accents for prompts and metadata)
+        "": p.user_text or "#ffffff",
+        "prompt": p.user_prefix or "bold #ffd75f",
+        "prompt b": p.user_prefix or "bold #ffd75f",
 
         # Bottom Toolbar
-        "bottom-toolbar": "noreverse bg:default #6c6c80",
+        "bottom-toolbar": "noreverse bg:default #8a8a8a",
         "bottom-toolbar.text": "noreverse bg:default",
-        "tb.rule": "#303040", "tb.sep": "#44445a", "tb.dim": "#6c6c80", "tb.val": "#b8b8cc",
-        "tb.model": "bold #00d7ff", "tb.warn": "bold #ffaf00", "tb.spinner": "bold #ffaf87",
-        "tb.mode-default": "#b8b8cc", "tb.mode-accept-edits": "bold #5fd787",
-        "tb.mode-plan": "bold #5fafff", "tb.mode-yolo": "bold #ff5f5f",
-        "tb.in": "#87afd7", "tb.out": "#af87d7", "tb.speed": "#5fd7af",
+        "tb.rule": "#303030", "tb.sep": "#444444", "tb.dim": "#8a8a8a", "tb.val": "#b8b8b8",
+        "tb.model": "bold #ffd75f", "tb.warn": "bold #ffaf00", "tb.spinner": "bold #ffe08a",
+        "tb.mode-default": "#b8b8b8", "tb.mode-accept-edits": "bold #5fd787",
+        "tb.mode-plan": "bold #ffd75f", "tb.mode-yolo": "bold #ff5f5f",
+        "tb.in": "#ffd75f", "tb.out": "#87d7af", "tb.speed": "#5fd7af",
+
+        # Prompt panel (OpenCode-style input box: raised bg + left accent bar)
+        **_box_styles(p),
 
         # Autocompletion Menu Dropdown (Replaces raw white/grey default with sleek dark/theme card)
         "completion-menu": f"bg:{p.menu_bg} {p.menu_fg}",
@@ -588,7 +698,7 @@ def choose_color_scheme(current: Optional[str] = None) -> Optional[str]:
             check = "● " if is_active else "  "
             line = f" {cursor} {check}{s}\n"
             if sel:
-                out.append(("bold fg:#00d7ff" if s != "light" else "bold fg:#0969da", line))
+                out.append(("bold fg:#ffd75f" if s != "light" else "bold fg:#1a7f37", line))
             else:
                 out.append(("", line))
         out.append(("\n", "\n"))

@@ -62,6 +62,7 @@ def test_prompt_queue_commands(tmp_path: Path):
 
 def test_shimmer_animation_in_prompt_message(tmp_path: Path):
     import hubble.spinner as spinner
+    from prompt_toolkit.formatted_text import to_formatted_text
     from rich.console import Console
 
     ctx = ToolContext(root=tmp_path)
@@ -71,20 +72,22 @@ def test_shimmer_animation_in_prompt_message(tmp_path: Path):
     # Ensure spinner.FOOTER is None (no duplicate middle bar)
     spinner.FOOTER = None
     
-    # When busy, start a shimmer and verify _prompt_message renders the Hubble shimmer
+    # When busy, start a shimmer and verify the preloader line above the box
+    # (the animated preloader hovers above the prompt box; the box itself stays quiet)
     repl.is_busy = True
     sh = spinner.start_shimmer(Console(), label="Aligning mirrors")
     try:
-        msg = repl._prompt_message()
-        msg_text = "".join(text for _, text in msg)
-        assert "Aligning mirrors" in msg_text
-        assert "❯" in msg_text
+        think = "".join(text for _, text in repl._thinking_screen())
+        assert "Aligning mirrors" in think
+        bar_text = "".join(text for _, text in to_formatted_text(repl._toolbar()))
+        assert "┃" in bar_text
+        assert "Aligning mirrors" not in bar_text
     finally:
         sh.stop()
         msg_idle = repl._prompt_message()
         msg_idle_text = "".join(text for _, text in msg_idle)
         assert "Aligning mirrors" not in msg_idle_text
-        assert "❯" in msg_idle_text
+        assert "┃" in msg_idle_text
 
 
 def test_no_live_during_prompt_proxy():

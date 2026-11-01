@@ -60,6 +60,17 @@ def tools_unsupported(message: str) -> bool:
                                 "function calling is not", "does not support function"))
 
 
+def _text(value: Any) -> str:
+    """Message content as text. Most gateways send a string, but some send a list of parts
+    ({"type": "text", "text": ...}); anything else is treated as empty."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        from hubble.images import content_text
+        return content_text(value)
+    return ""
+
+
 def _probe(client: httpx.Client, base_url: str, headers: Dict[str, str], model: str, timeout: float) -> Dict[str, Any]:
     # 32 tokens, not 10: reasoning models spend a small budget thinking and return empty content.
     # The request offers a tool, the way Hubble always does: a deployment without tool calling
@@ -86,8 +97,9 @@ def _probe(client: httpx.Client, base_url: str, headers: Dict[str, str], model: 
         else:
             choices = resp.json().get("choices") or []
             msg = (choices[0].get("message") or {}) if choices else {}
-            content = (msg.get("content") or "").strip()
-            reasoning = (msg.get("reasoning_content") or msg.get("reasoning") or "").strip()
+            # Some gateways return content as a list of parts instead of a string.
+            content = _text(msg.get("content")).strip()
+            reasoning = _text(msg.get("reasoning_content") or msg.get("reasoning")).strip()
             finish = choices[0].get("finish_reason") if choices else None
             if content:
                 result.update(available=True, reason="OK", sample=content.replace("\n", " ")[:60])

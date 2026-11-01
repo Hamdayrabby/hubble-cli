@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from hubble.agent import Agent, Events
+from hubble.agent import Agent, Events, estimate_messages
 from hubble.permissions import Permissions
 from hubble.provider import ToolCall, TurnResult
 from hubble.settings import detect_context_window
@@ -59,6 +59,18 @@ def test_detect_context_window_frontier_and_open_models():
     assert detect_context_window("custom-unknown-model", default=128000) == 128_000
 
 
+def test_detect_context_window_deepseek_v4_family():
+    # The V4 series runs a 1M window; the V4.1 Flash served by gateways under
+    # names like 'deepseek-ai/DeepSeek-V4.1-Flash-1017' must not fall into the
+    # generic 64k 'deepseek' bucket (that inflated the context meter ~16x).
+    assert detect_context_window("deepseek-v4") == 1_048_576
+    assert detect_context_window("deepseek-ai/DeepSeek-V4.1-Flash-1017") == 1_048_576
+    # older/other v-series stay 128k
+    assert detect_context_window("deepseek-v3.1") == 128_000
+    assert detect_context_window("deepseek-v3") == 128_000
+    assert detect_context_window("deepseek-coder-33b") == 64_000
+
+
 def test_agent_effective_context_window_auto(tmp_path):
     ctx = ToolContext(root=tmp_path)
 
@@ -86,6 +98,55 @@ def test_agent_context_ratio_dynamic(tmp_path):
 
     # 50,000 / 200,000 = 0.25 (25%)
     assert agent.context_ratio() == pytest.approx(0.25)
+
+
+def test_agent_effective_context_window_deepseek_v4(tmp_path):
+    ctx = ToolContext(root=tmp_path)
+    agent = Agent(None, {"model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+                         "context_window": 128000}, ctx, Permissions(), Events())
+    assert agent.effective_context_window() == 1_048_576
+    # and the meter reads the real fill level, not a 16x-inflated one
+    agent.context_tokens = 7_000
+    assert agent.context_ratio() == pytest.approx(7_000 / 1_048_576)
+
+
+def test_agent_prefers_provider_published_context_window(tmp_path, monkeypatch):
+    """When the provider publishes a context_length for the exact model (the /models
+    scan cache), it wins over both the name table and the generic default; switching
+    models re-resolves instead of staying memoized."""
+    import hubble.providers
+
+    def _fake_models(name):
+        return [{"model": "some-unknown-model", "context_length": 262144}]
+
+    monkeypatch.setattr(hubble.providers, "provider_models", _fake_models)
+    ctx = ToolContext(root=tmp_path)
+    agent = Agent(None, {"model": "some-unknown-model", "context_window": 128000}, ctx, Permissions(), Events())
+    agent.provider_name = "river_ai"
+    assert agent.effective_context_window() == 262_144
+
+    # switching to a model without a published size falls back to the name table
+    agent.model = "claude-3-5-sonnet"
+    assert agent.effective_context_window() == 200_000
+    # ...and an explicit context_window (non-default) still wins over everything
+    agent.settings["context_window"] = 50_000
+    assert agent.effective_context_window() == 50_000
+
+
+def test_account_estimate_includes_tool_schemas(tmp_path):
+    """Without published usage the meter's fallback counts the tool schemas too,
+    which the real request carries."""
+    from hubble.agent import RunStats
+    from hubble.provider import TurnResult
+
+    ctx = ToolContext(root=tmp_path)
+    agent = Agent(None, {"model": "claude-3-5-sonnet", "context_window": 128000, "max_tokens": 10},
+                  ctx, Permissions(), Events())
+    agent._append({"role": "user", "content": "hi"})
+    result = TurnResult(text="ok", usage={})                    # no usage published
+    stats = RunStats()
+    prompt_toks, _ = agent._account(result, stats)
+    assert prompt_toks > estimate_messages(agent.messages)      # strictly more than transcript alone
 
 
 def test_subagent_adaptive_token_budget(tmp_path):

@@ -17,6 +17,7 @@ from prompt_toolkit.filters import completion_is_selected
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from rich.markup import escape
 from rich.table import Table
 
@@ -34,6 +35,7 @@ from hubble.session import SessionStore
 from hubble.settings import HOME_DIR, save_user_setting
 from hubble.skills import Skill, TEMPLATE, discover_skills
 from hubble.tools import is_secret_path, truncate
+from hubble.theme import CONTENT_MAX
 from hubble.ui import console, pick, render_todos
 
 MENTION_RX = re.compile(r"(?<![\w@])@([\w./\\:-]+)")
@@ -54,6 +56,35 @@ def _segmented_gauge(ratio: float, blocks: int = 6) -> str:
     ratio = max(0.0, min(1.0, ratio))
     filled = int(round(ratio * blocks))
     return "█" * filled + "░" * (blocks - filled)
+
+
+def _indent_frags(frags: List[Tuple[str, str]], margin: int, style: str = "") -> List[Tuple[str, str]]:
+    """Shift every rendered row right by `margin` columns, so multi-row blocks (the home
+    screen, the sub-agent board) center on the same column as the prompt panel. `style`
+    colors that margin (the home canvas paints it with the page background)."""
+    if margin <= 0:
+        return frags
+    out: List[Tuple[str, str]] = []
+    need = True                       # at the start of a row
+    for style_, text in frags:
+        while text:
+            i = text.find("\n")
+            if i < 0:
+                if need:
+                    out.append((style, " " * margin))
+                    need = False
+                out.append((style_, text))
+                text = ""
+            else:
+                head, text = text[:i], text[i + 1:]
+                if head:
+                    if need:
+                        out.append((style, " " * margin))
+                        need = False
+                    out.append((style_, head))
+                out.append(("", "\n"))
+                need = True
+    return out
 
 
 def _estimate_session_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
@@ -233,6 +264,22 @@ class ReplCompleter(Completer):
             return
 
 
+class _QueuedPrompt(str):
+    """A queued prompt that carries the clipboard images pasted with it.
+
+    Subclasses str so /queue, /clear-queue and anything else that only reads the text keep
+    working; Repl.send reads `images` so a later paste cannot be consumed by an earlier
+    queued message.
+    """
+
+    images: List[Path]
+
+    def __new__(cls, text: str, images: Optional[List[Path]] = None):
+        prompt = super().__new__(cls, text)
+        prompt.images = list(images or [])
+        return prompt
+
+
 class Repl:
     def __init__(self, agent: Agent, store: SessionStore, providers: Optional[Dict[str, ProviderConfig]] = None):
         self.providers: Dict[str, ProviderConfig] = dict(providers or {})
@@ -343,6 +390,7 @@ class Repl:
           "[auto|explicit|off]")
         r("queue", self.cmd_queue, "List pending queued user prompts")
         r("clear-queue", self.cmd_clear_queue, "Clear all pending queued user prompts", ("cq",))
+        r("update", self.cmd_update, "Check for updates and upgrade Hubble", ("upgrade",))
 
     def _load_custom_commands(self):
         """Skills become /<name>; a skill's own description is shown in /help and /<tab>."""
@@ -387,7 +435,6 @@ class Repl:
 
         try:
             from prompt_toolkit.input.vt100_parser import ANSI_SEQUENCES
-            from prompt_toolkit.keys import Keys
             ANSI_SEQUENCES["\x1b[13;2u"] = Keys.ControlJ
             ANSI_SEQUENCES["\x1b[27;2;13~"] = Keys.ControlJ
         except Exception:
@@ -401,7 +448,9 @@ class Repl:
             else:
                 buf.insert_text("\n")
 
-        @kb.add("escape", "v")  # Alt+V; terminals keep Ctrl+V for their own text paste
+        @kb.add("escape", "v")  # Alt+V; works in every terminal, including Windows Terminal
+        @kb.add("c-v")          # Ctrl+V where the terminal forwards it (macOS/Linux); terminals
+                                # that keep Ctrl+V for their own text paste never send it to us
         def _(event):
             placeholder = self.paste_image()
             if placeholder:
@@ -409,6 +458,19 @@ class Repl:
             else:
                 from prompt_toolkit.application import run_in_terminal
                 run_in_terminal(lambda: console.print("[dim]No image on the clipboard.[/dim]"))
+
+        @kb.add(Keys.BracketedPaste)  # Windows Terminal sends empty bracketed paste when clipboard has only an image
+        def _(event):
+            if event.data == "":  # empty paste = likely image-only clipboard
+                placeholder = self.paste_image()
+                if placeholder:
+                    event.current_buffer.insert_text(placeholder + " ")
+                else:
+                    from prompt_toolkit.application import run_in_terminal
+                    run_in_terminal(lambda: console.print("[dim]No image on the clipboard.[/dim]"))
+            else:
+                # Normal text paste: let the default handler insert it
+                event.current_buffer.insert_text(event.data.replace("\r\n", "\n").replace("\r", "\n"))
 
         @kb.add("c-j")
         def _(event):
@@ -428,6 +490,27 @@ class Repl:
         def _(event):
             self.agent.permissions.cycle_mode()
             event.app.invalidate()
+
+        # Completion menu navigation: highlight-only. prompt_toolkit's stock DOWN/UP
+        # rewrite the buffer with every move (tab-cycle preview); here the menu picks
+        # on Enter instead, so the arrows just move the selection.
+        from prompt_toolkit.filters import has_completions
+
+        @kb.add("down", filter=has_completions)
+        def _(event):
+            st = event.current_buffer.complete_state
+            if not (st and st.completions):
+                return
+            idx = st.complete_index
+            st.go_to_index(0 if idx is None else min(idx + 1, len(st.completions) - 1))
+
+        @kb.add("up", filter=has_completions)
+        def _(event):
+            st = event.current_buffer.complete_state
+            if not (st and st.completions):
+                return
+            idx = st.complete_index
+            st.go_to_index(len(st.completions) - 1 if idx is None else max(idx - 1, 0))
 
         @kb.add("enter", filter=completion_is_selected)
         def _(event):
@@ -457,60 +540,521 @@ class Repl:
         self.session = PromptSession(history=FileHistory(str(HOME_DIR / "history")), completer=ReplCompleter(self),
                                      complete_while_typing=True, key_bindings=kb, bottom_toolbar=self._toolbar,
                                      multiline=False, enable_history_search=False,
+                                     input_processors=[self._panel_fill()],
+                                     placeholder=self._placeholder_text, prompt_continuation=self._bar_continuation,
                                      refresh_interval=0.1 if getattr(self, "is_busy", False) else 1.0,
-                                     reserve_space_for_menu=14, style=Style.from_dict(get_prompt_style(theme_name)))
+                                     reserve_space_for_menu=0, style=Style.from_dict(get_prompt_style(theme_name)))
+        # Auto-select the closest option: every time the completer produces matches, the
+        # top row is pre-highlighted, so the menu always shows the closest match selected
+        # and Enter runs it without touching the arrow keys (OpenCode-style).
+        # go_to_index only sets the index — no event re-fire, no loop.
+        self.session.default_buffer.on_completions_changed += self._autoselect_first
+        # OpenCode-style prompt box: the default buffer window has an unbounded height, so the
+        # root HSplit hands it every leftover screen row — the typed line stays at the top
+        # while the metadata row and footer are pushed to the screen bottom, splitting the
+        # box. Capping that one window at the buffer's own preferred (wrap-aware) height
+        # keeps the input row, metadata row and footer on one adjacent surface.
+        from prompt_toolkit.filters import Always
+        from prompt_toolkit.layout.controls import BufferControl
+
+        for window in self.session.layout.find_all_windows():
+            control = window.content
+            if isinstance(control, BufferControl) and control.buffer is self.session.default_buffer:
+                window.dont_extend_height = Always()
+                break
+
+        # The pondering line hovers ABOVE the box while a turn runs (Claude Code layout):
+        # the committed prompt scrolls into the transcript above it, this animated row
+        # plays below it, and the input panel sits at the bottom. The extra fixed-height
+        # spacer row between the transcript and the panel gives both breathing room —
+        # fixed dimensions (no weight/weight fillers) keep the renderer calm.
+        from prompt_toolkit.filters import Condition
+        from prompt_toolkit.layout.containers import ConditionalContainer, HSplit, Window
+        from prompt_toolkit.layout.controls import FormattedTextControl
+        from prompt_toolkit.layout.dimension import Dimension
+
+        root_layout = self.session.layout.container
+        if isinstance(root_layout, HSplit):
+            thinking = ConditionalContainer(
+                Window(FormattedTextControl(self._thinking_screen, show_cursor=False),
+                       height=Dimension.exact(1), always_hide_cursor=True, dont_extend_height=True),
+                filter=Condition(lambda: bool(getattr(self, "is_busy", False))),
+            )
+            gap = Window(height=Dimension.exact(1), char=" ")   # blank row: transcript ↔ panel
+            root_layout.children.insert(0, thinking)
+            root_layout.children.insert(0, gap)
+
+        # The renderer grows the prompt region to all the rows below the cursor, so on a
+        # roomy terminal the input row would sit at the top of a tall empty region with the
+        # footer pinned to the screen bottom. Cap that height at the layout's preferred
+        # height, so the box stays compact and finished output scrolls above it.
+        renderer = self.session.app.renderer
+
+        def _cap_prompt_height() -> None:
+            try:
+                size = renderer.output.get_size()
+                preferred = self.session.layout.container.preferred_height(
+                    size.columns, size.rows
+                ).preferred
+            except Exception:
+                return
+            if renderer._min_available_height > preferred:
+                renderer._min_available_height = preferred
+
+        request_position = renderer.request_absolute_cursor_position
+
+        def _capped_request() -> None:
+            request_position()
+            _cap_prompt_height()
+
+        report_row = renderer.report_absolute_cursor_row
+
+        def _capped_report(row: int) -> None:
+            report_row(row)
+            _cap_prompt_height()
+
+        renderer.request_absolute_cursor_position = _capped_request
+        renderer.report_absolute_cursor_row = _capped_report
+
+        # The completions dropdown: prompt_toolkit ships it as a floating menu whose
+        # fit math expects reserved menu space inside the input region
+        # (`reserve_space_for_menu`). This compact panel gives the input region a
+        # single row (a taller reserve would permanently enlarge the box), so that
+        # math computes a zero-height menu and the dropdown never paints. Replace the
+        # default floats with one that parks directly ABOVE the input row — the box,
+        # metadata row and footer stay visible (OpenCode-style) — and grows upward over
+        # the transcript as tall as the screen allows.
+        from prompt_toolkit.filters import has_completions, is_done
+        from prompt_toolkit.layout.containers import Float, FloatContainer
+
+        def _has_default_menu_float(c) -> bool:
+            for f in getattr(c, "floats", []):
+                chain = getattr(f, "content", None)
+                for _ in range(4):
+                    if chain is None:
+                        break
+                    if "CompletionsMenu" in type(chain).__name__:
+                        return True
+                    chain = getattr(chain, "content", None)
+            return False
+
+        class _AboveInput:
+            """Stand-in for the float's `bottom`, read at draw time by
+            `FloatContainer._draw_float`, which computes
+            `ypos = (container height - float height) - bottom`. This object's
+            `__rsub__` returns `-rows`, so the float's bottom row lands one row above
+            the input row: an always-visible gap under the menu and room to grow
+            upward over the transcript, whatever the completion menu's height."""
+
+            def __init__(self, repl: "Repl"):
+                self.repl = repl
+
+            def __rsub__(self, other) -> int:
+                return -self.repl._menu_row_count()
+
+        stack = [self.session.layout.container]
+        found = False
+        while stack:
+            c = stack.pop()
+            if isinstance(c, FloatContainer) and _has_default_menu_float(c):
+                c.floats = [
+                    Float(left=0, bottom=_AboveInput(self), height=self._menu_row_count,
+                          z_index=10 ** 8,
+                          content=ConditionalContainer(
+                              Window(
+                                  FormattedTextControl(self._completion_menu_screen,
+                                                       show_cursor=False),
+                                  style="", always_hide_cursor=True,
+                                  wrap_lines=False),
+                              filter=has_completions & ~is_done)),
+                ]
+                found = True
+                break
+            for sub in (getattr(c, "content", None),
+                        getattr(c, "alternative_content", None)):
+                if sub is not None and hasattr(sub, "write_to_screen"):
+                    stack.append(sub)
+            stack.extend(getattr(c, "children", None) or [])
+            stack.extend(getattr(f, "content", None)
+                         for f in getattr(c, "floats", []))
+        if not found:   # the default menu float shape changed upstream — surface it in e2e dumps
+            try:
+                import sys
+                print("<MENU FLOATS NOT SWAPPED>", file=sys.stderr)
+            except Exception:
+                pass
         return self.session
 
-    SEP = "<tb.sep>  ·  </tb.sep>"
+    SEP = " <tb.sep>·</tb.sep> "
+    # OpenCode-style prompt panel: a left accent bar spans the input and the metadata row,
+    # sitting on a raised panel background, with a footer row below.
+    BAR = "┃"
+    BAR_IN = "<box.bar>┃</box.bar>    "   # accent bar + four cells of padding, in front of input lines
+
+    def _geo(self, cols: Optional[int] = None) -> Tuple[int, int]:
+        """(left margin, panel width): the panel column centered in the terminal, so the
+        whole app (panel, info row, footer, transcript) sits in the middle like OpenCode."""
+        if cols is None:
+            try:
+                from prompt_toolkit.application import get_app
+                cols = get_app().output.get_size().columns
+            except Exception:
+                from shutil import get_terminal_size
+                cols = get_terminal_size((80, 24)).columns
+        width = max(40, min(cols, CONTENT_MAX))
+        return max(0, (cols - width) // 2), width
+
+    def _bar_continuation(self, width: int, line_number: int, wrap_count: int):
+        """prompt continuation for wrapped/multiline input lines: keep the panel's accent
+        bar in front of every input line, like OpenCode's prompt box."""
+        left, _ = self._geo()
+        return [("", " " * left), ("class:box.bar", self.BAR), ("", "    ")]
+
+    PLACEHOLDERS = [
+        "Ask anything…",
+        "Fix a TODO in the codebase",
+        "What is the tech stack of this project?",
+        "Explain how this codebase is structured",
+        "Fix the failing tests",
+    ]
+
+    def _placeholder_text(self):
+        """Rotating prompt placeholder (OpenCode cycles suggestions too).
+
+        The placeholder renders at the end of the (empty) input line, so it fills its own
+        row with the panel background up to the panel's right edge."""
+        if getattr(self, "is_busy", False):
+            text = "Queue a message…"
+        else:
+            try:
+                idx = int(time.time() // 4) % len(self.PLACEHOLDERS)
+            except Exception:
+                idx = 0
+            text = self.PLACEHOLDERS[idx]
+        _, width = self._geo()
+        tail = " " * max(0, width - 3 - len(text))
+        return HTML(f"<box.dim>{text}</box.dim><box.bg>{tail}</box.bg>")
+
+    def _panel_fill(self):
+        """Input-row fill: raises every cell of the typed text onto the panel background
+        and fills from the accent bar to the panel's right edge.
+
+        Runs as an input processor (before the placeholder appends), so it skips the row
+        when the placeholder is visible — the placeholder fills its own row instead. A
+        bg-only class keeps the text colors; the empty area left of the panel margin stays
+        untouched (that is why the window itself is not painted)."""
+        repl = self
+
+        from prompt_toolkit.formatted_text.utils import fragment_list_to_text
+        from prompt_toolkit.layout.processors import Processor, Transformation, TransformationInput
+        from prompt_toolkit.utils import get_cwidth
+
+        class _Fill(Processor):
+            def apply_transformation(self, ti: TransformationInput) -> Transformation:
+                session = getattr(repl, "session", None)
+                if session is not None and session.default_buffer.text == "":
+                    return Transformation(ti.fragments)   # placeholder owns this row
+                _, width = repl._geo()
+                out = [(style + " class:box.fill" if style.strip() else "class:box.fill", text)
+                       for style, text in ti.fragments]
+                tail = width - 3 - get_cwidth(fragment_list_to_text(ti.fragments))
+                if tail > 0:
+                    out.append(("class:box.fill", " " * tail))
+                return Transformation(out)
+        return _Fill()
+
+    def _input_prefix(self) -> List[Tuple[str, str]]:
+        """The accent bar + four cells of padding in front of the typed text."""
+        left, _ = self._geo()
+        return [("", " " * left), ("class:box.bar", self.BAR), ("", "    ")]
+
+    MENU_MAX_ROWS = 12   # dropdown rows visible at once: a tall palette, not a sliver
+
+    def _autoselect_first(self, buf) -> None:
+        """Pre-highlight the first (closest) match whenever completions refresh."""
+        st = getattr(buf, "complete_state", None)
+        if st is not None and st.completions and st.complete_index is None:
+            st.go_to_index(0)
+
+    def _menu_row_count(self) -> int:
+        """Rows the completion dropdown shows at once: everything the screen allows
+        (capped at MENU_MAX_ROWS) instead of a fixed sliver of four."""
+        state = getattr(getattr(getattr(self, "session", None), "default_buffer", None),
+                        "complete_state", None)
+        total = len(getattr(state, "completions", None) or [])
+        if not total:
+            return min(4, self.MENU_MAX_ROWS)
+        try:
+            from prompt_toolkit.application import get_app
+            rows = get_app().output.get_size().rows
+        except Exception:
+            rows = 24
+        # keep the input row and a little transcript context visible below the menu
+        return max(1, min(total, self.MENU_MAX_ROWS, max(4, rows - 6)))
+
+    def _completion_menu_screen(self):
+        """The completions dropdown drawn INSIDE the panel (OpenCode-style): while the
+        buffer has an active completion state, this overlay parks directly ABOVE the
+        input row. Each row lists one completion with its description; the selected row
+        carries the highlight, and the bottom row right-aligns a current/total counter.
+        pt's stock float cannot render here — the compact panel leaves the input region
+        one row tall, so its fit math collapses to zero, and a reserve
+        (`reserve_space_for_menu`) would permanently enlarge the box."""
+        session = getattr(self, "session", None)
+        if session is None:
+            return ""
+        from prompt_toolkit.utils import get_cwidth
+
+        state = session.default_buffer.complete_state
+        comps = list(getattr(state, "completions", None) or [])
+        if not comps:
+            return ""
+        total = len(comps)
+        sel = getattr(state, "complete_index", None)
+        sel = 0 if sel is None else max(0, min(sel, total - 1))
+        n = self._menu_row_count()
+        base = max(0, min(sel - 3, total - n))
+        visible = comps[base:base + n]
+
+        left, width = self._geo()
+        inner = max(10, width - 3)          # bg columns, aligned with the input text
+        labels = [(c.display_text or c.text or "").replace("\n", " ") for c in comps]
+        label_w = min(max([get_cwidth(x) for x in labels] or [0]), 26)
+        pos = f"{sel + 1}/{total}"
+        pos_w = get_cwidth(pos)
+
+        out: List[Tuple[str, str]] = []
+        n_visible = len(visible)
+        for i, comp in enumerate(visible):
+            label = labels[base + i][:label_w]
+            meta = (comp.display_meta_text or "").replace("\n", " ")
+            cur = base + i == sel
+            cls = ("class:completion-menu.completion.current" if cur
+                   else "class:completion-menu")
+            row = [("", " " * (left + 3)), (cls, f"{label:<{label_w}}")]
+            used = label_w
+            # description badge, clipped to whatever the counter leaves
+            if i == n_visible - 1:
+                room = inner - used - pos_w - 2
+            else:
+                room = inner - used - 1
+            if meta and room > 2:
+                meta_txt = meta[:room].rstrip()
+                meta_cls = ("class:completion-menu.meta.completion.current" if cur
+                            else "class:completion-menu.meta.completion")
+                row.append((cls, " " * 2))
+                row.append((meta_cls, meta_txt))
+                used += 2 + get_cwidth(meta_txt)
+            tail = inner - used - (pos_w if i == n_visible - 1 else 0)
+            if tail > 0:
+                row.append((cls, " " * tail))
+            if i == n_visible - 1:
+                row.append(("class:completion-menu.meta.completion", pos))
+            out.extend(row)
+            out.append(("", "\n"))
+        del out[-1]
+        return out
 
     def _toolbar(self):
         a = self.agent
+        self._sync_scan_visuals()
+        busy = getattr(self, "is_busy", False)
+        left, width = self._geo()
+        self._toolbar_height = 4  # panel pad row + metadata row + dark gap + footer, always
+
+        # The metadata row lives INSIDE the prompt box, directly under the padded input
+        # row: the same stats in every state — a [working…]/[N queued] flag while busy,
+        # last-turn context when idle. The animated preloader hovers above the box
+        # instead, so the box keeps one constant height (patch_stdout stays in step).
+        from prompt_toolkit.formatted_text import FormattedText, to_formatted_text
         mode = a.permissions.mode
         ratio = a.context_ratio()
         gauge = _segmented_gauge(ratio, blocks=6)
-        ctx_cls = "tb.warn" if ratio >= 0.8 else "tb.val"
-        prov = f"<tb.dim>{escape_html(a.provider_name)} </tb.dim>" if len(self.providers) > 1 else ""
-        s = self.agent.last_stats if getattr(self, "is_busy", False) and self.agent.last_stats.model_calls else self.turn_stats
-        session_total = a.total_prompt_tokens + a.total_completion_tokens
-        prompt_tokens = s.prompt_tokens if s else 0
-        completion_tokens = s.completion_tokens if s else 0
-        speed = (s.completion_tokens / s.duration) if (s and s.duration) else 0.0
+        ctx_cls = "box.warn" if ratio >= 0.8 else "box.val"
+        s = a.last_stats if busy and getattr(a.last_stats, "model_calls", 0) else self.turn_stats
 
         def short(n: int) -> str:
             return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.1f}k" if n >= 1e4 else f"{n:,}"
 
-        parts = [
-            f"<tb.model>● {prov}{escape_html(a.model)}</tb.model>",
-            f"<tb.mode-{mode}>[{mode}]</tb.mode-{mode}>",
-            f"<{ctx_cls}>context [{gauge}] {ratio:.0%}</{ctx_cls}>",
-            f"<tb.in>↑ {short(prompt_tokens)}</tb.in> <tb.dim>in</tb.dim>",
-            f"<tb.out>↓ {short(completion_tokens)}</tb.out> <tb.dim>out</tb.dim>",
-            f"<tb.dim>session</tb.dim> <tb.val>{short(session_total)}</tb.val>",
-            f"<tb.speed>{speed:.1f}</tb.speed> <tb.dim>tok/s</tb.dim>",
-        ]
+        meta = {
+            "mode": f"<box.mode-{mode}>{escape_html(mode)}</box.mode-{mode}>",
+            "model": f"<box.model>{escape_html(a.model)}</box.model>",
+            "provider": f"<box.dim>{escape_html(a.provider_name)}</box.dim>",
+            "context": f"<{ctx_cls}>context [{gauge}] {ratio:.0%}</{ctx_cls}>",
+        }
+        scans = [f"checking {escape_html(n)} {s_scan.progress()}" for n, s_scan in self.scanners.items() if s_scan.running]
+        if scans:
+            meta["scans"] = f"<box.dim>{escape_html(' · '.join(scans))}</box.dim>"
         if getattr(self, "message_queue", None):
-            parts.append(f"<tb.warn>[{len(self.message_queue)} queued]</tb.warn>")
-        elif getattr(self, "is_busy", False):
-            parts.append("<tb.dim>[working...]</tb.dim>")
-        if s and s.tool_calls:
-            parts.append(f"<tb.val>{s.tool_calls}</tb.val> <tb.dim>tool call{'s' if s.tool_calls != 1 else ''}</tb.dim>")
+            meta["working"] = f"<box.warn>[{len(self.message_queue)} queued]</box.warn>"
+        elif busy:
+            meta["working"] = "<box.dim>[working…]</box.dim>"
+        if busy and s:
+            speed = s.completion_tokens / s.duration if s.duration else 0.0
+            meta["io"] = f"<box.in>↑ {short(s.prompt_tokens)}</box.in> <box.out>↓ {short(s.completion_tokens)}</box.out>"
+            meta["speed"] = f"<box.speed>{speed:.1f}</box.speed> <box.dim>tok/s</box.dim>"
+            if s.tool_calls:
+                meta["tools"] = f"<box.val>{s.tool_calls}</box.val> <box.dim>tool call{'s' if s.tool_calls != 1 else ''}</box.dim>"
         if a.pinned:
-            parts.append(f"<tb.val>{len(a.pinned)}</tb.val> <tb.dim>pinned</tb.dim>")
+            meta["pinned"] = f"<box.val>{len(a.pinned)}</box.val> <box.dim>pinned</box.dim>"
         if getattr(self, "multiline_mode", False):
-            parts.append("<tb.val>multiline</tb.val>")
-        for n, s_scan in self.scanners.items():
-            if s_scan.running:
-                parts.append(f"<tb.dim>checking {escape_html(n)}</tb.dim> <tb.val>{s_scan.progress()}</tb.val>")
-        self._sync_scan_visuals()
+            meta["multiline"] = "<box.val>multiline</box.val>"
+        pending_images = getattr(self, "_pending_images", [])
+        if pending_images:
+            n = len(pending_images)
+            meta["images"] = f"<box.warn>[{n} image{'s' if n != 1 else ''}]</box.warn>"
+
+        # One metadata row, dropping the least important info rather than wrapping.
+        core = ["mode", "model", "provider", "context"]
+        optional = ["images", "scans", "working", "io", "speed", "tools", "pinned", "multiline"]
+        row = self._meta_row(meta, core, optional, max(10, width - 3))
+        tail = " " * max(0, width - 3 - self._visible_len(row))
+        row1 = list(to_formatted_text(HTML((" " * left) + self.BAR_IN + row
+                                           + (f"<box.bg>{tail}</box.bg>" if tail else ""))))
+
+        # A blank panel row directly under the input line: the box breathes (OpenCode).
+        pad_row = list(to_formatted_text(
+            HTML((" " * left) + f"<box.bar>{self.BAR}</box.bar><box.bg>{' ' * (width - 1)}</box.bg>")))
+
+        # One bigger box: pad row under the input, then the metadata row, then a dark gap
+        # and the dim footer (OpenCode layout).
+        return FormattedText(list(pad_row) + [("", "\n")] + list(row1) + [("", "\n\n")]
+                             + list(to_formatted_text(HTML(self._footer_row(width, busy)))))
+
+    def _shimmer_frags(self, width: int) -> List[Tuple[str, str]]:
+        """The busy preloader as formatted-text frags — a shimmer wave sweeping over the icon
+        and a rotating pondering verb, plus turn stats. `_thinking_screen` renders this line
+        ABOVE the prompt box while a turn runs."""
+        from hubble.board import CLAUDE_GLYPHS, _fmt_tokens
+        from hubble import spinner
+
+        events = getattr(self.agent, "events", None)
+        frame = int(time.time() * 10)
+
+        active = getattr(spinner, "_ACTIVE_SHIMMER", None)
+        active_label = getattr(getattr(active, "shimmer", None), "label", None) if active and not getattr(active, "_stopped", False) else None
+        current_tool = getattr(events, "current_tool", None) or getattr(events, "current_activity", None)
+
+        # Multiple icon sets for dynamic morphing across pondering stages (Claude Code & Command Code style)
+        CLAUDE_ICON_SETS = [
+            ["✻", "✼", "✽", "✾", "✿", "❀", "❁", "❂"],             # Classic Claude blooming flower
+            ["✦", "✧", "✶", "✷", "✸", "✹", "✺", "✢"],             # Command Code starbursts & sparks
+            ["✿", "❀", "❁", "❂", "❁", "❀", "✿", "✾"],             # Botanical breathing bloom
+            ["✶", "✻", "✦", "❂", "✺", "✹", "✷", "✧"],             # Radiant star & sunburst
+            ["⌾", "◎", "◇", "◈", "◆", "✦", "✧", "❂"],             # Cosmic prisms & lens
+            ["✢", "✳", "∗", "✻", "✼", "✽", "✦", "✧"],             # Star cluster
+        ]
+
+        CLAUDE_VERBS = [
+            "Pondering", "Synthesizing", "Cogitating", "Contemplating", "Analyzing",
+            "Focusing the lens", "Connecting dots", "Percolating", "Aligning mirrors",
+            "Marinating", "Noodling", "Formulating response", "Caramelizing",
+            "Decoding signals", "Calculating trajectories", "Consulting the stars",
+            "Reviewing", "Evaluating", "Reflecting", "Drifting through code", "Thinking",
+        ]
+        sh_obj = getattr(active, "shimmer", None)
+        t_start = getattr(events, "turn_start_time", 0.0) or (getattr(sh_obj, "start", 0.0) if sh_obj else 0.0)
+        elapsed = max(0.0, time.time() - t_start) if t_start else 0.0
+
+        if active_label:
+            words = active_label + "…"
+            glyph = CLAUDE_GLYPHS[frame % len(CLAUDE_GLYPHS)]
+        elif current_tool and current_tool not in ("Thinking...", "Generating response...", "Processing results..."):
+            words = current_tool + "…"
+            glyph = CLAUDE_GLYPHS[frame % len(CLAUDE_GLYPHS)]
+        else:
+            verb_idx = int(elapsed / 2.8) % len(CLAUDE_VERBS)
+            words = CLAUDE_VERBS[verb_idx] + "…"
+            active_set = CLAUDE_ICON_SETS[verb_idx % len(CLAUDE_ICON_SETS)]
+            glyph = active_set[frame % len(active_set)]
+
+        tools = getattr(events, "tool_calls_this_turn", 0)
+        s = getattr(getattr(self, "agent", None), "last_stats", None)
+
+        # Shimmer wave over the icon and letters (Claude Code & Command Code style)
+        sweep = len(words) + 8
+        pos = (elapsed * 14) % sweep - 4
+        icon_d = abs(-1 - pos)
+        icon_style = "fg:#ffffff bold" if icon_d < 1.4 else "fg:#ffe08a bold" if icon_d < 2.8 else "fg:#ffd75f bold"
+        frags = [(icon_style, f"{glyph} ")]
+        for i, ch in enumerate(words):
+            d = abs(i - pos)
+            style = "fg:#ffffff bold" if d < 1.2 else "fg:#ffe08a bold" if d < 2.5 else "fg:#d7b055"
+            frags.append((style, ch))
+
+        stats_parts = [f"{int(elapsed)}s"]
+        if s and (s.prompt_tokens or s.completion_tokens):
+            stats_parts.append(f"{_fmt_tokens(s.prompt_tokens + s.completion_tokens)} tok")
+        elif getattr(events, "reasoning_chars", 0):
+            r_tok = int(events.reasoning_chars / 3.8)
+            if r_tok:
+                stats_parts.append(f"{_fmt_tokens(r_tok)} tok")
+        if tools:
+            stats_parts.append(f"{tools} tool{'s' if tools != 1 else ''}")
+        stats_parts.append("ctrl+c to interrupt")
+
+        frags.append(("fg:#8a8a8a", f"  ({' · '.join(stats_parts)})"))
+        pending_images = getattr(self, "_pending_images", [])
+        if pending_images:
+            n = len(pending_images)
+            frags.append(("fg:#ffaf00 bold", f"  [{n} image{'s' if n != 1 else ''}]"))
+        return frags
+
+    def _shimmer_row(self, width: int) -> List[Tuple[str, str]]:
+        """The preloader as an in-panel row (bar + padding + frags + bg tail). The live
+        animation hovers above the box instead; this slot keeps the shimmer usable
+        programmatically (tests, headless fallbacks)."""
+        from prompt_toolkit.utils import get_cwidth
+
+        frags = self._shimmer_frags(width)
+        # The preloader lives INSIDE the panel: bar + padding + shimmer + bg tail.
+        left, _ = self._geo()
+        row = [("", " " * left), ("class:box.bar", self.BAR), ("class:box.bg", "  ")] + frags
+        tail = " " * max(0, width - 3 - get_cwidth("".join(text for _, text in frags)))
+        row.append(("class:box.bg", tail))
+        return row
+
+    def _thinking_screen(self) -> List[Tuple[str, str]]:
+        """The animated preloader line rendered ABOVE the prompt box while a turn runs
+        (Claude Code layout): the committed prompt scrolled past above it, this line
+        animates below it, and the input panel sits at the bottom. Content aligns with
+        the panel's text column; the row is one line tall, long text is simply clipped."""
         try:
-            from prompt_toolkit.application import get_app
-            width = get_app().output.get_size().columns
+            left, width = self._geo()
+            frags = self._shimmer_frags(width)
         except Exception:
-            width = 80
-        rule = f"<tb.rule>{'─' * max(0, width - 1)}</tb.rule>"
-        lines = self._pack(parts, width - 3)
-        self._toolbar_height = 1 + len(lines)  # rule + status lines
-        return HTML(rule + "".join("\n  " + line for line in lines))
+            return [("", "  Working…")]
+        return [("", " " * (left + 3))] + frags
+
+    @staticmethod
+    def _visible_len(markup: str) -> int:
+        return len(re.sub(r"<[^>]+>", "", markup).replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&"))
+
+    def _meta_row(self, meta: Dict[str, str], core: List[str], optional: List[str], width: int) -> str:
+        def join(keys: List[str]) -> str:
+            return self.SEP.join(meta[k] for k in keys if k in meta)
+        keys = list(core) + [k for k in optional if k in meta]
+        while len(keys) > len(core) and self._visible_len(join(keys)) > width:
+            for k in reversed(optional):
+                if k in keys:
+                    keys.remove(k)
+                    break
+            else:
+                break
+        return join(keys)
+
+    def _footer_row(self, width: int, busy: bool) -> str:
+        """cwd on the left, keybind hints on the right (OpenCode footer), inside the content column."""
+        left, _ = self._geo()
+        hints = "<ft.hint>ctrl+c interrupt</ft.hint>" if busy else \
+            "<ft.hint>shift+tab mode</ft.hint>  <ft.hint>/ commands</ft.hint>"
+        hint_w = self._visible_len(hints)
+        cwd = escape_html(str(self.agent.ctx.root or "").replace(str(Path.home()), "~"))
+        budget = max(4, width - 1 - hint_w)   # keep room for the gap before the hints
+        if len(cwd) > budget:
+            cwd = "…" + cwd[-(budget - 1):]
+        pad = " " * max(1, width - len(cwd) - hint_w)
+        return (" " * left) + f"<ft.dir>{cwd}</ft.dir>{pad}{hints}"
 
     def _run_footer(self):
         """One dim status line pinned under the live display while the agent works."""
@@ -518,7 +1062,7 @@ class Repl:
         a = self.agent
         s = a.last_stats
         mode = a.permissions.mode
-        mode_style = {"accept-edits": "bold #5fd787", "plan": "bold #5fafff", "yolo": "bold #ff5f5f"}.get(mode, "#b8b8cc")
+        mode_style = {"accept-edits": "bold #5fd787", "plan": "bold #ffd75f", "yolo": "bold #ff5f5f"}.get(mode, "#b8b8b8")
         ratio = a.context_ratio()
         gauge = _segmented_gauge(ratio, blocks=6)
         session_total = a.total_prompt_tokens + a.total_completion_tokens
@@ -529,26 +1073,26 @@ class Repl:
 
         t = Text("  ")
         if len(self.providers) > 1:
-            t.append("● ", style="bold #00d7ff")
-            t.append(f"{a.provider_name} ", style="#6c6c80")
-            t.append(a.model, style="bold #00d7ff")
+            t.append("● ", style="bold #ffd75f")
+            t.append(f"{a.provider_name} ", style="#8a8a8a")
+            t.append(a.model, style="bold #ffd75f")
         else:
-            t.append(f"● {a.model}", style="bold #00d7ff")
-        sep = ("  ·  ", "#44445a")
+            t.append(f"● {a.model}", style="bold #ffd75f")
+        sep = ("  ·  ", "#444444")
         t.append(*sep).append(f"[{mode}]", style=mode_style)
-        t.append(*sep).append(f"context [{gauge}] {ratio:.0%}", style="bold #ffaf00" if ratio >= 0.8 else "#b8b8cc")
-        t.append(*sep).append(f"↑ {short(s.prompt_tokens)}", style="#87afd7").append(" ", style="")
-        t.append(f"↓ {short(s.completion_tokens)}", style="#af87d7").append(" this turn", style="#6c6c80")
-        t.append(*sep).append("session ", style="#6c6c80").append(
-            short(session_total), style="#b8b8cc")
-        t.append(*sep).append(f"{speed:.1f}", style="#5fd7af").append(" tok/s", style="#6c6c80")
+        t.append(*sep).append(f"context [{gauge}] {ratio:.0%}", style="bold #ffaf00" if ratio >= 0.8 else "#b8b8b8")
+        t.append(*sep).append(f"↑ {short(s.prompt_tokens)}", style="#ffd75f").append(" ", style="")
+        t.append(f"↓ {short(s.completion_tokens)}", style="#87d7af").append(" this turn", style="#8a8a8a")
+        t.append(*sep).append("session ", style="#8a8a8a").append(
+            short(session_total), style="#b8b8b8")
+        t.append(*sep).append(f"{speed:.1f}", style="#5fd7af").append(" tok/s", style="#8a8a8a")
         if s.tool_calls:
-            t.append(*sep).append(str(s.tool_calls), style="#b8b8cc").append(
-                f" tool call{'s' if s.tool_calls != 1 else ''}", style="#6c6c80")
+            t.append(*sep).append(str(s.tool_calls), style="#b8b8b8").append(
+                f" tool call{'s' if s.tool_calls != 1 else ''}", style="#8a8a8a")
         if getattr(self, "message_queue", None):
             t.append(*sep).append(f"[{len(self.message_queue)} queued]", style="bold #ffaf00")
         elif getattr(self, "is_busy", False):
-            t.append(*sep).append("[working...]", style="#6c6c80")
+            t.append(*sep).append("[working...]", style="#8a8a8a")
         return t
 
     @classmethod
@@ -624,11 +1168,12 @@ class Repl:
     def _home_info(self):
         a = self.agent
         known = [m for m in provider_models(a.provider_name) if m.get("available") is not False]
+        update_banner = self.updates.get_banner_text() if hasattr(self, "updates") else None
         return dict(version=__version__, provider=a.provider_name, model=a.model, mode=a.permissions.mode,
                     root=str(a.ctx.root), session_id=a.session.id if a.session else None,
                     memory_files=[p.name for p, _ in a.memory], model_count=len(known) or None,
                     provider_count=len(self.providers), resumable=max(0, len(self.store.list()) - 1),
-                    show_provider=len(self.providers) > 1)
+                    show_provider=len(self.providers) > 1, update_banner=update_banner)
 
     def _live_home_ok(self) -> bool:
         return (bool(self.agent.settings.get("home_animation", True)) and sys.stdin.isatty()
@@ -641,23 +1186,24 @@ class Repl:
             self._home = home_info_lines(**self._home_info())
             self._home_t0 = time.time()
         else:
-            from hubble.banner import render_home
-            render_home(console, logo_style=self.agent.settings.get("logo"), **self._home_info())
+            from hubble.banner import canvas_bg, render_home
+            render_home(console, logo_style=self.agent.settings.get("logo"), bg=canvas_bg(), **self._home_info())
 
     def _home_message(self):
         """Prompt message for the first prompt: the whole home screen, re-rendered every frame."""
         from prompt_toolkit.application import get_app
         from prompt_toolkit.formatted_text import FormattedText
-        from hubble.banner import compose_home_fragments
+        from hubble.banner import canvas_bg, compose_home_fragments
         try:
             app = get_app()
             size = app.output.get_size()
             typed = app.current_buffer.text
         except Exception:
-            return HTML("<prompt><b>❯</b></prompt> ")
-        # Leave room for the prompt line and the toolbar (3+ lines), plus the completion menu while typing / or @.
-        toolbar = getattr(self, "_toolbar_height", 3)
-        budget = size.rows - 2 - toolbar - (10 if typed[:1] in ("/", "@") or " @" in typed else 0)
+            return HTML("<box.bar>┃</box.bar>  ")
+        # Leave room for the prompt panel (spacer + input + pad + metadata rows and the
+        # footer), plus the completion menu while typing / or @.
+        toolbar = getattr(self, "_toolbar_height", 4)
+        budget = size.rows - 4 - toolbar - (10 if typed[:1] in ("/", "@") or " @" in typed else 0)
         cached = getattr(self, "_home_frame", None)
         # When user is typing, freeze animation frame to eliminate input latency and prevent keystroke lag.
         if typed.strip() and cached is not None and cached[2] == budget and cached[3] == size.columns:
@@ -667,97 +1213,35 @@ class Repl:
         if cached and cached[0] == fps_step and cached[2] == budget and cached[3] == size.columns:
             return cached[1]
         status, tips = self._home
-        frags = compose_home_fragments(size.columns, max(budget, 3), elapsed, status, tips, __version__,
-                                       logo_style=self.agent.settings.get("logo"))
-        frame = FormattedText(frags + [("class:prompt", "❯"), ("", " ")])
+        left, width = self._geo(size.columns)
+        bg = canvas_bg()
+        frags = compose_home_fragments(width, max(budget, 3), elapsed, status, tips, __version__,
+                                       logo_style=self.agent.settings.get("logo"), bg=bg,
+                                       pad=max(0, size.columns - left - width) if bg else 0)
+        prefix = self._input_prefix()
+        if bg:
+            prefix[0] = (f"bg:{bg}", prefix[0][1])   # the input row's margin is canvas too
+        frame = FormattedText(_indent_frags(frags, left, style=f"bg:{bg}" if bg else "")
+                              + [("", "\n")] + prefix)
         self._home_frame = (fps_step, frame, budget, size.columns)
         return frame
 
     def _prompt_message(self):
-        """Prompt message: shows active subagent or agent preloader when busy, then the prompt line."""
+        """Prompt message: the accent-bar prefix of the input row — one row, in every state.
+
+        The busy preloader hovers above the box (its own layout row), so the prompt
+        region's height only changes with the board/the thinking row appearing or
+        hiding, and patch_stdout repaints stay in step."""
         from prompt_toolkit.formatted_text import FormattedText
 
-        busy = getattr(self, "is_busy", False)
         events = getattr(getattr(self, "agent", None), "events", None)
         board = getattr(events, "board", None)
         if board is not None and hasattr(board, "to_formatted_text"):
             frags = board.to_formatted_text()
             if frags:
-                return FormattedText(frags + [("", "\n"), ("class:prompt", "❯"), ("", " ")])
-
-        if busy:
-            from hubble.board import CLAUDE_GLYPHS, _fmt_tokens
-            from hubble import spinner
-            import shutil
-            frame = int(time.time() * 10)
-
-            active = getattr(spinner, "_ACTIVE_SHIMMER", None)
-            active_label = getattr(getattr(active, "shimmer", None), "label", None) if active and not getattr(active, "_stopped", False) else None
-            current_tool = getattr(events, "current_tool", None) or getattr(events, "current_activity", None)
-
-            # Multiple icon sets for dynamic morphing across pondering stages (Claude Code & Command Code style)
-            CLAUDE_ICON_SETS = [
-                ["✻", "✼", "✽", "✾", "✿", "❀", "❁", "❂"],             # Classic Claude blooming flower
-                ["✦", "✧", "✶", "✷", "✸", "✹", "✺", "✢"],             # Command Code starbursts & sparks
-                ["✿", "❀", "❁", "❂", "❁", "❀", "✿", "✾"],             # Botanical breathing bloom
-                ["✶", "✻", "✦", "❂", "✺", "✹", "✷", "✧"],             # Radiant star & sunburst
-                ["⌾", "◎", "◇", "◈", "◆", "✦", "✧", "❂"],             # Cosmic prisms & lens
-                ["✢", "✳", "∗", "✻", "✼", "✽", "✦", "✧"],             # Star cluster
-            ]
-
-            CLAUDE_VERBS = [
-                "Pondering", "Synthesizing", "Cogitating", "Contemplating", "Analyzing",
-                "Focusing the lens", "Connecting dots", "Percolating", "Aligning mirrors",
-                "Marinating", "Noodling", "Formulating response", "Caramelizing",
-                "Decoding signals", "Calculating trajectories", "Consulting the stars",
-                "Reviewing", "Evaluating", "Reflecting", "Drifting through code", "Thinking",
-            ]
-            sh_obj = getattr(active, "shimmer", None)
-            t_start = getattr(events, "turn_start_time", 0.0) or (getattr(sh_obj, "start", 0.0) if sh_obj else 0.0)
-            elapsed = max(0.0, time.time() - t_start) if t_start else 0.0
-
-            if active_label:
-                words = active_label + "…"
-                glyph = CLAUDE_GLYPHS[frame % len(CLAUDE_GLYPHS)]
-            elif current_tool and current_tool not in ("Thinking...", "Generating response...", "Processing results..."):
-                words = current_tool + "…"
-                glyph = CLAUDE_GLYPHS[frame % len(CLAUDE_GLYPHS)]
-            else:
-                verb_idx = int(elapsed / 2.8) % len(CLAUDE_VERBS)
-                words = CLAUDE_VERBS[verb_idx] + "…"
-                active_set = CLAUDE_ICON_SETS[verb_idx % len(CLAUDE_ICON_SETS)]
-                glyph = active_set[frame % len(active_set)]
-
-            cols = shutil.get_terminal_size((80, 24)).columns
-            tools = getattr(events, "tool_calls_this_turn", 0)
-            s = getattr(getattr(self, "agent", None), "last_stats", None)
-
-            # Shimmer wave over the icon and letters (Claude Code & Command Code style)
-            sweep = len(words) + 8
-            pos = (elapsed * 14) % sweep - 4
-            icon_d = abs(-1 - pos)
-            icon_style = "fg:#ffffff bold" if icon_d < 1.4 else "fg:#a5f3fc bold" if icon_d < 2.8 else "fg:#00d7ff bold"
-            frags = [(icon_style, f"{glyph} ")]
-            for i, ch in enumerate(words):
-                d = abs(i - pos)
-                style = "fg:#ffffff bold" if d < 1.2 else "fg:#a5f3fc bold" if d < 2.5 else "fg:#38bdf8"
-                frags.append((style, ch))
-
-            stats_parts = [f"{int(elapsed)}s"]
-            if s and (s.prompt_tokens or s.completion_tokens):
-                stats_parts.append(f"{_fmt_tokens(s.prompt_tokens + s.completion_tokens)} tok")
-            elif getattr(events, "reasoning_chars", 0):
-                r_tok = int(events.reasoning_chars / 3.8)
-                if r_tok:
-                    stats_parts.append(f"{_fmt_tokens(r_tok)} tok")
-            if tools:
-                stats_parts.append(f"{tools} tool{'s' if tools != 1 else ''}")
-            stats_parts.append("ctrl+c to interrupt")
-
-            frags.append(("fg:#6c6c80", f"  ({' · '.join(stats_parts)})"))
-            return FormattedText(frags + [("", "\n"), ("class:prompt", "❯"), ("", " ")])
-
-        return FormattedText([("class:prompt", "❯"), ("", " ")])
+                left, _ = self._geo()
+                return FormattedText(_indent_frags(frags, left) + [("", "\n")] + self._input_prefix())
+        return FormattedText(self._input_prefix())
 
     def fallback_for(self, provider: str, model: str):
         choice = resolve_fallback(self.agent.settings, self.providers, provider, model)
@@ -818,7 +1302,11 @@ class Repl:
     def _announce_update(self):
         notice = self.updates.pending_notice()
         if notice:
-            console.print(f"[bold yellow]⬆ {escape(notice)}[/bold yellow]")
+            hint = self.updates.get_banner_text()
+            if hint:
+                console.print(f"[bold #ffd75f]{escape(hint)}[/bold #ffd75f]")
+            else:
+                console.print(f"[bold yellow]⬆ {escape(notice)}[/bold yellow]")
 
     def _announce_scans(self):
         for name in list(self._unannounced):
@@ -881,8 +1369,8 @@ class Repl:
                     from hubble.theme import get_palette
                     from hubble.ui import ACTIVE_THEME
                     pal = get_palette(ACTIVE_THEME)
-                    p_col = pal.user_prefix or "bold #00d7ff"
-                    u_col = pal.user_text or "#00d7ff"
+                    p_col = pal.user_prefix or "bold #ffd75f"
+                    u_col = pal.user_text or "#ffffff"
                     console.print(f"[{p_col}]❯[/{p_col}] [{u_col}]{escape(next_text)}[/{u_col}]")
                     try:
                         self.send(next_text)
@@ -898,16 +1386,47 @@ class Repl:
 
     def cmd_queue(self, arg: str = ""):
         if self.message_queue:
-            console.print(f"[cyan]Queued prompts ({len(self.message_queue)}):[/cyan]")
+            console.print(f"[yellow]Queued prompts ({len(self.message_queue)}):[/yellow]")
             for i, qm in enumerate(self.message_queue, 1):
                 console.print(f"  {i}. {escape(qm)}")
         else:
             console.print("[dim]No queued prompts.[/dim]")
 
     def cmd_clear_queue(self, arg: str = ""):
-        count = len(self.message_queue)
-        self.message_queue.clear()
+        count = self._clear_queue()
         console.print(f"[yellow]Cleared {count} queued prompt(s).[/yellow]")
+
+    def _clear_queue(self) -> int:
+        """Drop queued prompts, deleting the temp files of images pasted with them."""
+        count = len(self.message_queue)
+        for prompt in self.message_queue:
+            for path in getattr(prompt, "images", []):
+                path.unlink(missing_ok=True)
+        self.message_queue.clear()
+        return count
+
+    def cmd_update(self, arg: str = ""):
+        """Check for updates and upgrade Hubble."""
+        from hubble.update import UpdateChecker, upgrade_command, is_newer, _fetch_latest
+        checker = UpdateChecker(enabled=True)
+        # Force a fresh check
+        latest = _fetch_latest()
+        if latest is None:
+            console.print("[yellow]Could not check for updates (network error or PyPI unavailable).[/yellow]")
+            return
+        if not is_newer(latest):
+            console.print(f"[green]You are on the latest version ({__version__}).[/green]")
+            return
+        console.print(f"[bold cyan]Update available:[/bold cyan] hubble {__version__} → {latest}")
+        console.print(f"Run: [bold]{upgrade_command()}[/bold]")
+        if arg.strip().lower() in ("yes", "y", "auto"):
+            import subprocess
+            try:
+                console.print("[dim]Upgrading...[/dim]")
+                result = subprocess.run(upgrade_command(), shell=True, check=True)
+                console.print("[green]Upgrade complete. Restart Hubble to use the new version.[/green]")
+            except subprocess.CalledProcessError as e:
+                console.print(f"[red]Upgrade failed: {e}[/red]")
 
     def _ask_approval_bridge(self, tool, args: Dict[str, Any], preview: Optional[str]) -> Tuple[str, str]:
         session = getattr(self, "session", None)
@@ -953,12 +1472,8 @@ class Repl:
                     if self._home is not None:
                         # Animated home screen lives in the prompt until the first message is sent;
                         # the last frame stays in the scrollback.
-                        text = session.prompt(self._home_message, refresh_interval=1 / 60, reserve_space_for_menu=0)
+                        text = session.prompt(self._home_message, refresh_interval=1 / 60)
                         self._home = None
-                        # PromptSession.prompt() kwargs overwrite the session permanently, not just for
-                        # that one call -- without resetting these, every later prompt keeps 0 reserved
-                        # menu space (so "/" never shows a dropdown again) and a needlessly fast redraw.
-                        session.reserve_space_for_menu = 14
                         session.refresh_interval = 1.0
                     else:
                         text = session.prompt(self._prompt_message, default=pending_default)
@@ -966,8 +1481,7 @@ class Repl:
                 except KeyboardInterrupt:
                     if self.is_busy:
                         if self.message_queue:
-                            count = len(self.message_queue)
-                            self.message_queue.clear()
+                            count = self._clear_queue()
                             console.print(f"[yellow]Cleared {count} queued message(s).[/yellow]")
                         self.agent.interrupt()
                         continue
@@ -1013,6 +1527,9 @@ class Repl:
                     else:
                         console.print("[yellow]Interrupted.[/yellow]")
         self._shutdown_event.set()
+        for path in self._take_pending_images():   # pasted but never sent
+            path.unlink(missing_ok=True)
+        self._clear_queue()
         if self._worker_thread and self._worker_thread.is_alive():
             self._task_queue.put(None)
             self._worker_thread.join(timeout=1.0)
@@ -1039,10 +1556,10 @@ class Repl:
             return cmd.fn(arg.strip())
         if self._worker_thread and self._worker_thread.is_alive():
             if self.is_busy:
-                self.message_queue.append(text)
-                console.print(f"  [cyan]●[/cyan] [dim]Queued ({len(self.message_queue)} in queue):[/dim] [bold]{escape(text)}[/bold]")
+                self.message_queue.append(_QueuedPrompt(text, self._take_pending_images()))
+                console.print(f"  [yellow]●[/yellow] [dim]Queued ({len(self.message_queue)} in queue):[/dim] [bold]{escape(text)}[/bold]")
                 return None
-            self._task_queue.put(text)
+            self._task_queue.put(_QueuedPrompt(text, self._take_pending_images()))
             time.sleep(0.04)
             return None
         self.send(text)
@@ -1050,8 +1567,11 @@ class Repl:
 
     def send(self, text: str):
         images: List[str] = []
+        # A queued prompt carries the images pasted with it; [] means "none" (do not steal
+        # images pasted for a later message). A plain str falls back to the pending images.
+        pasted = getattr(text, "images", None)
         prompt = self.expand_mentions(text, images)
-        prompt = self._attach_pasted_images(prompt, images)
+        prompt = self._attach_pasted_images(prompt, images, pasted)
         self.agent.run(prompt, images or None)
         if self.agent.last_stats.model_calls:
             self.turn_stats = self.agent.last_stats  # shown in the bar under the input box
@@ -1064,8 +1584,17 @@ class Repl:
         self._pending_images.append(path)
         return f"[Image #{len(self._pending_images)}]"
 
-    def _attach_pasted_images(self, prompt: str, images: List[str]) -> str:
-        for i, path in enumerate(self._pending_images, 1):
+    def _take_pending_images(self) -> List[Path]:
+        """Detach the images pasted so far, so a queued prompt owns them: the next paste
+        starts again at [Image #1], and two messages cannot consume each other's images."""
+        pending, self._pending_images = self._pending_images, []
+        return pending
+
+    def _attach_pasted_images(self, prompt: str, images: List[str],
+                              pasted: Optional[List[Path]] = None) -> str:
+        if pasted is None:
+            pasted = self._take_pending_images()
+        for i, path in enumerate(pasted, 1):
             if f"[Image #{i}]" not in prompt:
                 continue  # the placeholder was deleted before sending: drop that image
             try:
@@ -1073,9 +1602,8 @@ class Repl:
                 console.print(f"[dim]  attached pasted image #{i}[/dim]")
             except (ImageError, OSError) as e:
                 console.print(f"[yellow]Skipped image #{i}: {escape(str(e))}[/yellow]")
-        for path in self._pending_images:
+        for path in pasted:
             path.unlink(missing_ok=True)
-        self._pending_images = []
         return prompt
 
     def expand_mentions(self, text: str, images: Optional[List[str]] = None) -> str:
@@ -1193,7 +1721,9 @@ class Repl:
                       "  @git / @diff   attach current git status or uncommitted diff\n"
                       "  @todos         attach active project task list\n"
                       "  Shift+Enter    insert a newline (also Esc+Enter / Ctrl+J)\n"
-                      "  Alt+V          paste an image from the clipboard (needs a vision model)\n"
+                      "  Ctrl+V / Alt+V paste an image from the clipboard (needs a vision model;\n"
+                      "                 Ctrl+V works in Windows Terminal and on macOS/Linux,\n"
+                      "                 Alt+V is the fallback when terminal reserves Ctrl+V)\n"
                       "  !command       run a shell command yourself (not sent to the model)\n"
                       "  #note          append a note to ./HUBBLE.md (project memory)\n"
                       "  Shift+Tab      cycle permission mode\n"
@@ -1307,7 +1837,7 @@ class Repl:
         except OSError:
             saved = ""
         prov = f"{escape(provider)}: " if len(self.providers) > 1 else ""
-        console.print(f"[dim]Model set to[/dim] [bold cyan]{prov}{escape(name)}[/bold cyan][dim]{saved}[/dim]")
+        console.print(f"[dim]Model set to[/dim] [bold yellow]{prov}{escape(name)}[/bold yellow][dim]{saved}[/dim]")
 
     def _apply_known_context_window(self, provider: str, name: str):
         """If the switched-to model publishes its real context size (most gateways don't;
@@ -1504,17 +2034,17 @@ class Repl:
         parent_prompt = max(0, a.total_prompt_tokens - sum(s.get("prompt_tokens", 0) for s in subs))
         parent_comp = max(0, a.total_completion_tokens - sum(s.get("completion_tokens", 0) for s in subs))
 
-        console.print("[bold cyan]Main Agent[/bold cyan]")
+        console.print("[bold yellow]Main Agent[/bold yellow]")
         console.print(f"  model          {escape(a.model)}")
         console.print(f"  input tokens   {parent_prompt:,}")
         console.print(f"  output tokens  {parent_comp:,}")
         console.print(f"  context        ~{a.context_tokens:,} / {window:,} ({a.context_ratio():.0%})")
         console.print(f"  messages       {len(a.messages)}")
 
-        console.print(f"\n[bold magenta]Subagents ({len(subs)})[/bold magenta]")
+        console.print(f"\n[bold green]Subagents ({len(subs)})[/bold green]")
         tbl = Table.grid(padding=(0, 2))
         tbl.add_column(style="bold", no_wrap=True)                  # name/label
-        tbl.add_column(style="dim cyan", no_wrap=True)              # model
+        tbl.add_column(style="dim yellow", no_wrap=True)               # model
         tbl.add_column(justify="right", no_wrap=True)               # input tokens
         tbl.add_column(justify="right", no_wrap=True)               # output tokens
         tbl.add_column(justify="right", no_wrap=True)               # context
@@ -1643,7 +2173,7 @@ class Repl:
         console.print("[bold]Active Developer Lens & Design Language:[/bold]")
         for p, text in active_lens:
             lines = text.splitlines()
-            console.print(f"  [bold cyan]{escape(str(p))}[/bold cyan] [dim]({len(lines)} lines)[/dim]")
+            console.print(f"  [bold yellow]{escape(str(p))}[/bold yellow] [dim]({len(lines)} lines)[/dim]")
             preview = [line for line in lines if line.strip() and not line.startswith("#")][:6]
             for pl in preview:
                 console.print(f"    [dim]{escape(pl)}[/dim]")
@@ -1773,7 +2303,7 @@ class Repl:
         from hubble.agent import team_block
         console.print("[bold]Sub-agent model team[/bold]")
         for i, e in enumerate(team, 1):
-            console.print(f"  {i}. [bold #00d7ff]{escape(e['model'])}[/bold #00d7ff]"
+            console.print(f"  {i}. [bold #ffd75f]{escape(e['model'])}[/bold #ffd75f]"
                           + (f"  [dim]{escape(e['use'])}[/dim]" if e.get("use") else ""))
         console.print("[dim]The main model picks from this list for each sub-agent, by what the part of the job "
                       "needs; say so in your prompt to steer it (\"use the fast model to search, opus to review\"). "
@@ -1877,7 +2407,7 @@ class Repl:
 
             console.print("\n[bold]Specialist Agents:[/bold]")
             for a in sorted(all_defs.values(), key=lambda x: x.name):
-                color = a.color if a.color in ("cyan", "magenta", "green", "yellow", "blue", "red", "purple", "orange") else "cyan"
+                color = a.color if a.color in ("yellow", "green", "orange", "cyan", "magenta", "blue", "red", "purple") else "yellow"
                 props = [a.capability]
                 if getattr(a, "fork_context", False):
                     props.append("forks context")
@@ -1899,38 +2429,38 @@ class Repl:
             desc = ""
             prompt = ""
             capability = "read_only"
-            color = "cyan"
+            color = "yellow"
             fork_context = False
 
             try:
                 while not name or not re.match(r"^[a-z0-9][a-z0-9_-]{0,40}$", name):
                     if name:
                         console.print("[yellow]Invalid name. Use lowercase letters, digits, - or _.[/yellow]")
-                    name = console.input("[bold cyan]Agent name[/bold cyan] (lowercase letters, digits, - or _): ").strip().lower()
+                    name = console.input("[bold yellow]Agent name[/bold yellow] (lowercase letters, digits, - or _): ").strip().lower()
                     if not name:
                         console.print("[yellow]Agent creation cancelled.[/yellow]")
                         return
 
-                desc = console.input(f"[bold cyan]Description[/bold cyan] (what '{name}' does / when to use): ").strip()
+                desc = console.input(f"[bold yellow]Description[/bold yellow] (what '{name}' does / when to use): ").strip()
                 if not desc:
                     desc = f"Specialist sub-agent for {name}"
 
-                prompt = console.input(f"[bold cyan]Role / system prompt[/bold cyan]: ").strip()
+                prompt = console.input(f"[bold yellow]Role / system prompt[/bold yellow]: ").strip()
                 if not prompt:
                     prompt = f"You are a specialist {name} sub-agent. Implement the assigned task thoroughly and report back."
 
-                cap_choice = console.input("[bold cyan]Capability[/bold cyan] [1. read_only, 2. edit] (default: 1): ").strip().lower()
+                cap_choice = console.input("[bold yellow]Capability[/bold yellow] [1. read_only, 2. edit] (default: 1): ").strip().lower()
                 capability = "edit" if cap_choice in ("2", "edit") else "read_only"
 
-                color_choice = console.input("[bold cyan]Color selection[/bold cyan] (cyan, magenta, green, yellow, blue, red) (default: cyan): ").strip().lower()
-                valid_colors = ("cyan", "magenta", "green", "yellow", "blue", "red", "purple", "orange")
-                color = color_choice if color_choice in valid_colors else "cyan"
+                color_choice = console.input("[bold yellow]Color selection[/bold yellow] (green, yellow, orange, red) (default: yellow): ").strip().lower()
+                valid_colors = ("yellow", "green", "orange", "red", "cyan", "magenta", "blue", "purple")
+                color = color_choice if color_choice in valid_colors else "yellow"
 
-                fork_choice = console.input("[bold cyan]Fork parent context by default?[/bold cyan] [yes / no] (default: no): ").strip().lower()
+                fork_choice = console.input("[bold yellow]Fork parent context by default?[/bold yellow] [yes / no] (default: no): ").strip().lower()
                 fork_context = fork_choice in ("yes", "y", "true", "1")
 
                 if not scope:
-                    scope_choice = console.input("[bold cyan]Scope[/bold cyan] [project / user] (default: project): ").strip().lower()
+                    scope_choice = console.input("[bold yellow]Scope[/bold yellow] [project / user] (default: project): ").strip().lower()
                     scope = "user" if scope_choice.startswith("u") else "project"
 
             except (EOFError, KeyboardInterrupt):
@@ -1940,7 +2470,7 @@ class Repl:
                 desc = desc or f"Specialist sub-agent for {name}"
                 prompt = prompt or f"You are a specialist {name} sub-agent."
                 capability = capability or "read_only"
-                color = color or "cyan"
+                color = color or "yellow"
                 scope = scope or "project"
 
             agent_def = save_agent_definition(
@@ -1992,7 +2522,7 @@ class Repl:
                 description=description,
                 prompt=prompt,
                 capability="edit",
-                color="magenta",
+                color="green",
                 fork_context=True,
                 scope=scope,
             )
@@ -2003,7 +2533,7 @@ class Repl:
 
         if subcmd in all_defs:
             a = all_defs[subcmd]
-            color = a.color if a.color in ("cyan", "magenta", "green", "yellow", "blue", "red", "purple", "orange") else "cyan"
+            color = a.color if a.color in ("yellow", "green", "orange", "cyan", "magenta", "blue", "red", "purple") else "yellow"
             console.print(f"[{color}][bold]{escape(a.name)}[/bold][/{color}] [dim]({escape(a.scope)})[/dim]")
             console.print(f"  Description:  {escape(a.description)}")
             console.print(f"  Capability:   {escape(a.capability)}")
@@ -2163,7 +2693,7 @@ class Repl:
         target = arg.strip().lower()
         if not target:
             current = self.agent.settings.get("logo", "regular")
-            console.print(f"Current logo: [bold cyan]{escape(current)}[/bold cyan]. Available: [bold]regular[/bold] (clean bold wordmark), [bold]block[/bold] (classic 6-row ANSI Shadow block letters), [bold]small[/bold] (1-line minimal wordmark).")
+            console.print(f"Current logo: [bold yellow]{escape(current)}[/bold yellow]. Available: [bold]regular[/bold] (clean bold wordmark), [bold]block[/bold] (classic 6-row ANSI Shadow block letters), [bold]small[/bold] (1-line minimal wordmark).")
             console.print("[dim]Usage: /logo [regular|block|small][/dim]")
             return
         if target in ("regular", "default", "normal", "word", "wordmark"):
@@ -2204,9 +2734,9 @@ class Repl:
             from hubble.ui import ACTIVE_THEME
 
             pal = get_palette(ACTIVE_THEME)
-            title = _to_rich_style(pal.thought_title) or "bold cyan"
+            title = _to_rich_style(pal.thought_title) or "bold yellow"
             text_style = _to_rich_style(pal.thought_text) or "dim"
-            border_color = "cyan"
+            border_color = "yellow"
             for token in title.split():
                 if token not in ("bold", "italic", "underline", "dim", "reverse"):
                     border_color = token
@@ -2442,7 +2972,7 @@ def escape_html(text: str) -> str:
 def print_history_tail(messages, n: int = 4):
     shown = [m for m in messages if m.get("role") in ("user", "assistant") and m.get("content")][-n:]
     for m in shown:
-        who = "[bold cyan]you[/bold cyan]" if m["role"] == "user" else "[bold magenta]hubble[/bold magenta]"
+        who = "[bold yellow]you[/bold yellow]" if m["role"] == "user" else "[bold green]hubble[/bold green]"
         text = content_text(m["content"]).strip().splitlines()
         preview = " ".join(text)[:200] if text else ""
         console.print(f"  {who} [dim]{escape(preview)}[/dim]")

@@ -77,3 +77,73 @@ def test_session_title_from_image_message(tmp_path):
     s = store.new("m")
     s.append({"role": "user", "content": user_content("fix this layout", ["data:image/png;base64,AA=="])})
     assert store.list()[0]["title"].startswith("fix this layout")
+
+
+def _repl(tmp_path):
+    from hubble.repl import Repl
+    from hubble.ui import ReplEvents
+
+    ctx = ToolContext(root=tmp_path)
+    agent = Agent(None, dict(SETTINGS), ctx, Permissions(), ReplEvents(ctx))
+    return Repl(agent, SessionStore(tmp_path), {"hubble": object()})
+
+
+def test_ctrl_v_pastes_clipboard_image(tmp_path, monkeypatch):
+    """Ctrl+V inserts the placeholder wherever the terminal forwards the key to us."""
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    import hubble.repl as repl_mod
+
+    repl = _repl(tmp_path)
+    img = tmp_path / "clip.png"
+    img.write_bytes(PNG)
+    monkeypatch.setattr(repl_mod, "grab_clipboard_image", lambda: img)
+    with create_pipe_input() as inp:
+        with create_app_session(input=inp, output=DummyOutput()):
+            session = repl._prompt_session()
+            inp.send_text("\x16")   # Ctrl+V
+            inp.send_text("\r")
+            text = session.prompt("> ")
+    assert text.strip() == "[Image #1]"
+    assert repl._pending_images == [img]
+
+
+def test_pending_images_show_in_prompt_panel(tmp_path):
+    from prompt_toolkit.formatted_text import to_formatted_text
+    from prompt_toolkit.formatted_text.utils import fragment_list_to_text
+
+    repl = _repl(tmp_path)
+    img = tmp_path / "clip.png"
+    img.write_bytes(PNG)
+    repl._pending_images = [img]
+    assert "[1 image]" in fragment_list_to_text(to_formatted_text(repl._toolbar()))
+    repl.is_busy = True
+    assert "[1 image]" in fragment_list_to_text(to_formatted_text(repl._toolbar()))
+
+
+def test_queued_prompt_keeps_its_own_pasted_image(tmp_path):
+    """A prompt queued while busy owns the image pasted with it; a later paste cannot be
+    consumed by the earlier message (and the temp file is cleaned up after sending)."""
+    from types import SimpleNamespace
+
+    repl = _repl(tmp_path)
+    img = tmp_path / "clip.png"
+    img.write_bytes(PNG)
+    repl._worker_thread = SimpleNamespace(is_alive=lambda: True)
+    repl.is_busy = True
+    repl._pending_images = [img]
+    repl.handle("look at [Image #1]")
+    queued = repl.message_queue[-1]
+    assert queued.images == [img] and repl._pending_images == []
+    seen = {}
+
+    def fake_run(prompt, images=None):
+        seen["content"] = images
+        return "ok"
+
+    repl.agent.run = fake_run
+    repl.send(queued)
+    assert len(seen["content"]) == 1 and seen["content"][0].startswith("data:image/png;base64,")
+    assert not img.exists()

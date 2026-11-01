@@ -189,10 +189,11 @@ def test_context_window_auto_can_be_disabled(tmp_path, monkeypatch):
     assert agent.settings["context_window"] == 128000  # untouched: auto-detection was turned off
 
 
-def test_menu_space_survives_the_home_screen_prompt(tmp_path, monkeypatch):
+def test_prompt_state_survives_the_home_screen_prompt(tmp_path, monkeypatch):
     """Regression test: PromptSession.prompt(**kwargs) permanently overwrites the session, not
-    just that call. The animated home screen's first prompt passes reserve_space_for_menu=0;
-    without resetting it afterward, every later prompt loses room for the "/" completion menu."""
+    just that call. The animated home screen's first prompt runs at 60fps; without resetting
+    the refresh interval afterward, every later prompt redraws at 60fps too. The floating
+    completion menu (reserve_space_for_menu=0) is the constructed default and must not change."""
     import threading
     import time
 
@@ -225,16 +226,15 @@ def test_menu_space_survives_the_home_screen_prompt(tmp_path, monkeypatch):
         threading.Thread(target=typer, daemon=True).start()
         with create_app_session(input=inp, output=DummyOutput()):
             session = repl._prompt_session()
-            assert session.reserve_space_for_menu == 14  # the constructed default
+            assert session.reserve_space_for_menu == 0  # completions float over the output
 
-            first = session.prompt(repl._home_message, refresh_interval=1 / 30, reserve_space_for_menu=0)
+            first = session.prompt(repl._home_message, refresh_interval=1 / 30)
             assert first == ""
-            assert session.reserve_space_for_menu == 0  # confirms the underlying prompt_toolkit behavior
+            assert session.refresh_interval == 1 / 30  # confirms the underlying prompt_toolkit behavior
 
-            # This is the fix under test: repl.run()'s loop resets these right after the home prompt.
-            session.reserve_space_for_menu = 14
+            # This is the fix under test: repl.run()'s loop restores this right after the home prompt.
             session.refresh_interval = 1.0
-            assert session.reserve_space_for_menu == 14
+            assert session.reserve_space_for_menu == 0  # the home prompt never touched it
 
             second = session.prompt(HTML("> "))
     assert second == "/exit"

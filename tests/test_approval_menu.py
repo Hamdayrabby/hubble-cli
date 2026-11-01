@@ -95,7 +95,7 @@ def test_render_choose_items_formatting():
 
     # Styles
     styles = {text: style for style, text in ft}
-    assert styles[" ❯ 1. Yes"] == "bold #00d7ff"
+    assert styles[" ❯ 1. Yes"] == "bold #ffd75f"
     assert styles["   2. Always"] == ""
     assert styles["  (esc)\n"] == "fg:ansigray"
 
@@ -105,7 +105,7 @@ def test_render_choose_items_selection_shift():
     ft = ui._render_choose_items("Choose one:", opts, selected_idx=1, esc_index=0)
     styles = {text: style for style, text in ft}
     assert styles["   1. Option A"] == ""
-    assert styles[" ❯ 2. Option B"] == "bold #00d7ff"
+    assert styles[" ❯ 2. Option B"] == "bold #ffd75f"
     assert styles["  (esc)\n"] == "fg:ansigray"
 
 
@@ -132,6 +132,8 @@ def test_ask_routes_through_approval_bridge(monkeypatch, tmp_path):
 
 
 def test_prompt_message_agent_running_status(tmp_path):
+    from prompt_toolkit.formatted_text import to_formatted_text
+
     from hubble.agent import Agent
     from hubble.permissions import Permissions
     from hubble.repl import Repl
@@ -144,26 +146,29 @@ def test_prompt_message_agent_running_status(tmp_path):
     repl = Repl(agent, SessionStore(tmp_path), {"test": object()})
 
     repl.is_busy = True
-    # 1. When executing a tool
+    # 1. When executing a tool, the animated preloader hovers ABOVE the box
     events.current_tool = "Fetching https://pypi.org/project/hubble-cli"
-    msg = repl._prompt_message()
-    msg_text = "".join(text for _, text in msg)
-    assert "Fetching https://pypi.org/project/hubble-cli" in msg_text
-    assert "❯" in msg_text
+    think = "".join(text for _, text in repl._thinking_screen())
+    assert "Fetching https://pypi.org/project/hubble-cli" in think
 
     # 2. When giving responses / thinking (Claude Code rotating verbs)
     events.current_tool = None
     events.current_activity = None
-    msg2 = repl._prompt_message()
-    msg2_text = "".join(text for _, text in msg2)
-    assert any(v in msg2_text for v in ["Thinking", "Synthesizing", "Analyzing", "Pondering"])
-    assert "❯" in msg2_text
+    think2 = "".join(text for _, text in repl._thinking_screen())
+    assert any(v in think2 for v in ["Thinking", "Synthesizing", "Analyzing", "Pondering"])
+
+    # 3. The box itself stays one quiet panel in both states: metadata + working flag
+    msg = repl._toolbar()
+    msg_text = "".join(text for _, text in to_formatted_text(msg))
+    assert "┃" in msg_text
+    assert "[working…]" in msg_text
+    assert not any(v in msg_text for v in ["Pondering", "Synthesizing", "Analyzing"])
 
     # 3. When a subagent is running
     events.subagent_start("sub-1", "research: task")
     msg3 = repl._prompt_message()
     msg3_text = "".join(text for _, text in msg3)
     assert "1 subagent running" in msg3_text
-    assert "❯" in msg3_text
+    assert "┃" in msg3_text
 
 

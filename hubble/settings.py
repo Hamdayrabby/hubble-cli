@@ -219,6 +219,7 @@ def detect_context_window(model: str, default: int = 128000) -> int:
     Provides accurate window limits for frontier and open-weights models:
     - Gemini 1.5/2.5 Pro / Ultra: 2,000,000 tokens
     - Other Gemini: 1,000,000 tokens
+    - DeepSeek-V4 family (V4/V4.1 Flash, ...): 1,048,576 tokens
     - Codestral: 256,000 tokens
     - Claude 3 / 3.5 / 3.7 / Opus: 200,000 tokens
     - GPT-4o, o1, Llama-3.1/3.2/3.3, Qwen-2.5, Mistral Large, DeepSeek-V3/R1: 128,000 tokens
@@ -237,6 +238,11 @@ def detect_context_window(model: str, default: int = 128000) -> int:
     # 1M models
     if "gemini" in m:
         return 1_000_000
+    # 1,048,576-token models: DeepSeek V4 series (V4, V4.1 Flash and friends) run
+    # with up to 1M context; without this they fall into the generic deepseek 64k
+    # bucket and the context meter inflates ~16x.
+    if "deepseek-v4" in m:
+        return 1_048_576
     # 256k models
     if "codestral" in m:
         return 256_000

@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.markup import escape
+from rich.padding import Padding
 from rich.panel import Panel
 from rich.text import Text
 
@@ -25,23 +26,70 @@ if sys.platform == "win32":
         except (AttributeError, ValueError):
             pass
 
-from hubble.theme import get_palette, get_rich_theme
-
-console = Console(highlight=False)
-err_console = Console(stderr=True, highlight=False)
+from hubble.theme import get_dialog_style, get_palette, get_rich_theme
 
 ACTIVE_THEME = "terminal"
 ASSISTANT_ICON = "🔭"
 ASSISTANT_TITLE = "🔭 Hubble"
 
 
+class ShiftedConsole(Console):
+    """Console that indents every printed block into the centered content column, so the
+    chat transcript, notices and tool lines line up with the prompt panel (OpenCode layout)."""
+
+    def print(self, *renderables: Any, **kwargs: Any) -> None:
+        if not renderables or not self.is_terminal:
+            super().print(*renderables, **kwargs)
+            return
+        try:
+            term_w = self.size.width or 80
+        except Exception:
+            term_w = 80
+        from hubble.theme import content_margins
+        left, width = content_margins(term_w)
+        right = max(0, term_w - left - width)
+        if len(renderables) == 1:
+            super().print(Padding(renderables[0], (0, right, 0, left)), **kwargs)
+        else:
+            # rich Groups would merge these into one renderable and lose per-arg
+            # markup/behaviour; leave multi-arg prints unpadded instead.
+            super().print(*renderables, **kwargs)
+
+
+console = ShiftedConsole(highlight=False)
+err_console = Console(stderr=True, highlight=False)
+
+_BG_PAINTED = False   # True while we've retuned the terminal's default background
+
+
 def apply_theme(name: str):
     """Update active theme across consoles and diff renderers."""
-    global ACTIVE_THEME
+    global ACTIVE_THEME, _BG_PAINTED
     ACTIVE_THEME = name or "terminal"
     theme = get_rich_theme(ACTIVE_THEME)
     console._theme = theme
     err_console._theme = theme
+    # The "black" theme owns the whole terminal (OpenCode-style true black). Change the
+    # terminal emulator's *default* background via OSC 11: the emulator repaints every
+    # default-background cell, so the page turns black edge-to-edge with no seams and
+    # nothing is painted on top of the transcript. (SGR bg + screen-clear hacks would
+    # stamp a black rectangle over everything — never do that.) Switching away resets it.
+    try:
+        tty = (sys.stdout.isatty() and console.is_terminal and not console.legacy_windows)
+    except Exception:
+        tty = False
+    if tty:
+        try:
+            if ACTIVE_THEME == "black" and not _BG_PAINTED:
+                sys.stdout.write("\x1b]11;#000000\x07")
+                sys.stdout.flush()
+                _BG_PAINTED = True
+            elif ACTIVE_THEME != "black" and _BG_PAINTED:
+                sys.stdout.write("\x1b]111\x07")   # reset default background
+                sys.stdout.flush()
+                _BG_PAINTED = False
+        except OSError:
+            pass
 
 
 TOOL_LABELS = {"read_file": "Read", "write_file": "Write", "edit_file": "Edit", "apply_patch": "Patch",
@@ -63,7 +111,7 @@ def render_diff(diff: str, max_lines: int = MAX_DIFF_LINES) -> Text:
     del_style = f"{pal.diff_del_bg} {pal.diff_del_fg}".strip() if pal.diff_del_bg else "red"
     gutter_style = pal.diff_num or "dim"
     sep_style = "dim"
-    accent_style = pal.accent or "cyan"
+    accent_style = pal.accent or "yellow"
 
     old_ln = 0
     new_ln = 0
@@ -150,7 +198,7 @@ class _BlockPreview:
     def __rich__(self):
         text, typing = self.owner.visible()
         if not text.strip():
-            return Text("▌", style="#8787af") if typing else Text("")
+            return Text("▌", style="#b8b8b8") if typing else Text("")
         lines = text.splitlines()
         room = max(4, self.owner.console.height - 4)
         if len(lines) > room:
@@ -158,7 +206,7 @@ class _BlockPreview:
         preview_text = "\n".join(lines)
         out = Text(preview_text)
         if typing:
-            out.append(" ▌", style="bold #8787af")
+            out.append(" ▌", style="bold #b8b8b8")
         return out
 
 
@@ -368,7 +416,7 @@ class ThinkingAccordion:
         tokens = int(self.char_count / 3.8)
         elapsed = time.time() - self.t0
         pal = get_palette(self.theme_name)
-        icon_col = pal.thought_title or "cyan bold"
+        icon_col = pal.thought_title or "yellow bold"
         text = Text()
         text.append("▶ Thinking ", style=icon_col)
         text.append(f"({elapsed:.1f}s · {tokens:,} tok)", style="dim")
@@ -395,7 +443,7 @@ class ThinkingAccordion:
         elapsed = (self.t1 or time.time()) - self.t0
         tokens = int(self.char_count / 3.8)
         pal = get_palette(self.theme_name)
-        icon_col = pal.thought_title or "cyan"
+        icon_col = pal.thought_title or "yellow"
         summary = Text()
         summary.append("▼ Thought for ", style="dim")
         summary.append(f"{elapsed:.1f}s", style="dim bold")
@@ -549,7 +597,8 @@ class ReplEvents(Events):
         if self.md:
             self.md.flush()
             if self.md.printed_any:
-                console.print()
+                console.print()      # blank line after response
+                console.print()      # extra space between responses
 
     def tool_start(self, tool: Tool, args: Dict[str, Any]):
         if self.accordion and not self.accordion.collapsed:
@@ -585,7 +634,7 @@ class ReplEvents(Events):
 
     def notice(self, message: str, level: str = "info"):
         self._stop_status()
-        style = {"warn": "yellow", "error": "bold red", "dim": "dim"}.get(level, "cyan")
+        style = {"warn": "yellow", "error": "bold red", "dim": "dim"}.get(level, "yellow")
         console.print(f"[{style}]{escape(message)}[/{style}]")
 
     def todos(self, todos: List[Dict[str, str]]):
@@ -617,14 +666,14 @@ class ReplEvents(Events):
                                 title_align="left", border_style="dim", box=box.ROUNDED, padding=(0, 1)))
         elif tool.kind == "exec":
             cmd = preview or args.get("command", "")
-            console.print(f"  [cyan]$[/cyan] [bold white]{escape(cmd)}[/bold white]")
+            console.print(f"  [yellow]$[/yellow] [bold white]{escape(cmd)}[/bold white]")
             if args.get("description"):
                 console.print(f"    [dim]{escape(args['description'])}[/dim]")
         else:
             if call_desc:
-                console.print(f"  [cyan]●[/cyan] [bold]{label}[/bold] [dim]{escape(call_desc)}[/dim]")
+                console.print(f"  [yellow]●[/yellow] [bold]{label}[/bold] [dim]{escape(call_desc)}[/dim]")
             else:
-                console.print(f"  [cyan]●[/cyan] [bold]{label}[/bold]")
+                console.print(f"  [yellow]●[/yellow] [bold]{label}[/bold]")
         always = {"edit": "edits", "web": tool.target(args), "mcp": tool.target(args)}.get(
             tool.kind, _command_family(args.get("command", "")))
         question = {"exec": "Run this command?", "edit": "Make this change?", "web": f"Fetch {always}?" if always else "Fetch this page?"}.get(
@@ -660,9 +709,9 @@ class ReplEvents(Events):
                 return "always", ""
             if can_stage_hunks and choice == 2:
                 selected_indices = []
-                console.print(f"\n[bold cyan]Interactive Hunk Staging for {escape(args.get('path', 'file'))} ({len(patch_hunks)} hunks):[/bold cyan]")
+                console.print(f"\n[bold yellow]Interactive Hunk Staging for {escape(args.get('path', 'file'))} ({len(patch_hunks)} hunks):[/bold yellow]")
                 for idx, hunk_str in enumerate(patch_hunks):
-                    console.print(Panel(render_diff(hunk_str), title=f"[bold]Hunk {idx + 1} of {len(patch_hunks)}[/bold]", border_style="cyan"))
+                    console.print(Panel(render_diff(hunk_str), title=f"[bold]Hunk {idx + 1} of {len(patch_hunks)}[/bold]", border_style="yellow"))
                     hunk_choice = choose(f"Stage hunk {idx + 1}?", ["Stage this hunk", "Skip this hunk", "Stage all remaining hunks", "Discard all remaining hunks"], esc_index=3)
                     if hunk_choice == 0:
                         selected_indices.append(idx)
@@ -852,7 +901,7 @@ def _render_choose_items(question: str, options: List[str], selected_idx: int = 
     for i, opt in enumerate(options):
         sel = i == selected_idx
         prefix = " ❯ " if sel else "   "
-        style = "bold #00d7ff" if sel else ""
+        style = "bold #ffd75f" if sel else ""
         out.append((style, f"{prefix}{i + 1}. {opt}"))
         if i == esc_index:
             out.append(("fg:ansigray", "  (esc)\n"))
@@ -949,57 +998,122 @@ def ask_line(message: str) -> str:
 
 
 def pick(title: str, items: List[Tuple[Any, str, str]], current: Any = None, max_visible: int = 14) -> Any:
-    """Inline arrow-key picker. items: (value, label, meta). Returns the chosen value or None.
+    """OpenCode-style inline dialog picker. items: (value, label, meta). Returns the chosen value or None.
 
-    Up/Down (or Ctrl+P/N) move, typing filters, Enter selects, Esc or Ctrl+C cancels.
+    A raised panel with a title row ("esc" at the right), a search field, an
+    accent-highlighted active row, a ● marker on the current item, right-aligned meta
+    badges and a footer hint row. Up/Down (or Ctrl+P/N) move, typing filters, Enter
+    selects, Esc or Ctrl+C cancels.
     """
     from prompt_toolkit.application import Application
     from prompt_toolkit.buffer import Buffer
     from prompt_toolkit.formatted_text import FormattedText
+    from prompt_toolkit.formatted_text.base import to_formatted_text
+    from prompt_toolkit.formatted_text.utils import fragment_list_len
     from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
     from prompt_toolkit.key_binding.defaults import load_key_bindings
     from prompt_toolkit.layout import HSplit, Layout, Window
     from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
-    from prompt_toolkit.layout.processors import BeforeInput
+    from prompt_toolkit.layout.processors import Processor, Transformation, TransformationInput
+    from prompt_toolkit.styles import Style
 
     if not items:
         return None
+    import shutil
+
+    term_w = shutil.get_terminal_size((80, 24)).columns
+    inset = 3                      # OpenCode DIALOG_INSET
+    label_w = max((len(it[1]) for it in items), default=10)
+    meta_w = max((len(it[2]) for it in items), default=0)
+    width = min(max(46, label_w + meta_w + 14), term_w - 2)
+    margin = max(0, (term_w - width) // 2)
+    content_w = width - 2 * inset
+
     state = {"idx": next((i for i, it in enumerate(items) if it[0] == current), 0)}
+    query = Buffer(multiline=False, on_text_changed=lambda _: state.__setitem__("idx", 0))
 
     def matches():
         q = query.text.strip().lower()
         return [it for it in items if not q or q in it[1].lower() or q in it[2].lower()]
 
-    def on_change(_):
-        state["idx"] = 0
+    def blank_row(trailing: str = "\n") -> List[Tuple[str, str]]:
+        """A full-width blank row of the raised panel (keeps the dialog height stable)."""
+        return [("", " " * margin), ("class:dlg.bg", " " * width + trailing)]
 
-    query = Buffer(multiline=False, on_text_changed=on_change)
-    label_width = min(max((len(it[1]) for it in items), default=10) + 2, 60)
+    def item_row(i: int, value: Any, label: str, meta: str) -> List[Tuple[str, str]]:
+        active = i == state["idx"]
+        mark = "●" if value == current else " "
+        meta = meta[: max(0, content_w - 6)]
+        label = label[: max(1, content_w - 3 - len(meta))]
+        pad = max(1, content_w - 2 - len(label) - len(meta))
+        if active:
+            return [("class:dlg.sel", f"{' ' * inset}{mark} {label}"), ("class:dlg.sel", " " * pad),
+                    ("class:dlg.sel-meta", meta), ("class:dlg.sel", " " * inset)]
+        mark_cls = "class:dlg.mark" if value == current else "class:dlg.bg"
+        return [("class:dlg.bg", " " * inset), (mark_cls, mark), ("class:dlg.bg", " "),
+                ("class:dlg.row", label), ("class:dlg.bg", " " * pad),
+                ("class:dlg.meta", meta), ("class:dlg.bg", " " * inset)]
 
-    def render():
+    def render_top():
+        out = blank_row()
+        shown = title[: max(8, content_w - 4)]
+        gap = max(1, content_w - len(shown) - 3)
+        out += [("", " " * margin), ("class:dlg.bg", " " * inset), ("class:dlg.title", shown),
+                ("class:dlg.bg", " " * gap), ("class:dlg.esc", "esc"), ("class:dlg.bg", " " * inset + "\n")]
+        return out + blank_row()
+
+    def render_rows():
         rows = matches()
         state["idx"] = max(0, min(state["idx"], len(rows) - 1))
         idx = state["idx"]
-        top = max(0, min(idx - max_visible // 2, len(rows) - max_visible))
-        out = [("bold", f" {title}\n")]
+        visible = max(1, min(max_visible, len(rows)))
+        top = max(0, min(idx - visible // 2, len(rows) - visible))
+        out = blank_row()
         if not rows:
-            out.append(("fg:ansiyellow", "   no matches\n"))
-        for i in range(top, min(top + max_visible, len(rows))):
+            out += [("", " " * margin), ("class:dlg.bg", " " * inset), ("class:dlg.dim", "No results found"),
+                    ("class:dlg.bg", " " * (content_w - 16) + inset * " " + "\n")]
+        for i in range(top, min(top + visible, len(rows))):
             value, label, meta = rows[i]
-            mark = "●" if value == current else " "
-            text = f" {mark} {label:<{label_width}} {meta}"
-            if i == idx:
-                pal = get_palette(ACTIVE_THEME)
-                sel_style = f"bg:{pal.menu_sel_bg} {pal.menu_sel_fg}"
-                out.append((sel_style, f"❯{text} \n"))
-            else:
-                style = "fg:ansigray" if "unavailable" in meta else ""
-                out.append((style, f" {text}\n"))
-        more = len(rows) - max_visible
-        pos = f"{idx + 1}/{len(rows)}" if rows else "0/0"
-        out.append(("fg:ansigray", f"  {pos}{'  (scroll for more)' if more > 0 else ''}"
-                                   "  ·  ↑↓ move · type to filter · Enter select · Esc cancel"))
+            out += [("", " " * margin)] + item_row(i, value, label, meta) + [("", "\n")]
+        if len(rows) > top + visible:
+            out += [("", " " * margin), ("class:dlg.bg", " " * inset), ("class:dlg.meta", "···"),
+                    ("class:dlg.bg", " " * (content_w - 3) + inset * " " + "\n")]
+        out += blank_row()
+        left_hint, right_hint = "↑↓ move · type to filter", "enter select · esc cancel"
+        if len(left_hint) + len(right_hint) + 1 > content_w:
+            left_hint, right_hint = "↑↓ move · enter select · esc cancel", ""
+        gap = max(1, content_w - len(left_hint) - len(right_hint))
+        out += [("", " " * margin), ("class:dlg.bg", " " * inset), ("class:dlg.hint", left_hint),
+                ("class:dlg.bg", " " * gap), ("class:dlg.hint-key", right_hint),
+                ("class:dlg.bg", " " * inset + "\n")]
+        out += blank_row(trailing="")
         return FormattedText(out)
+
+    def filter_prefix():
+        """Caret + (empty-state) 'Search…' hint, aligned with the rows inside the panel."""
+        if query.text:
+            return FormattedText([("class:dlg.bg", " " * inset), ("class:dlg.mark", "›")])
+        return FormattedText([("class:dlg.bg", " " * inset), ("class:dlg.mark-dim", "›"),
+                              ("class:dlg.bg", " "), ("class:dlg.meta", "Search…")])
+
+    class SearchRow(Processor):
+        """Render the search row as part of the dialog panel: left margin + panel inset +
+        caret in front of the filter text, panel-bg fill up to the dialog's right edge."""
+
+        def __init__(self):
+            self.target = margin + width
+
+        def apply_transformation(self, ti: TransformationInput) -> Transformation:
+            if ti.lineno != 0:
+                return Transformation(ti.fragments)
+            prefix = to_formatted_text(filter_prefix())
+            frags = prefix + list(ti.fragments)
+            shift = fragment_list_len(prefix)
+            pad = self.target - fragment_list_len(frags)
+            if pad > 0:
+                frags.append(("class:dlg.bg", " " * pad))
+            return Transformation(frags, source_to_display=lambda i: i + shift,
+                                  display_to_source=lambda i: max(0, i - shift))
 
     kb = KeyBindings()
 
@@ -1032,11 +1146,13 @@ def pick(title: str, items: List[Tuple[Any, str, str]], current: Any = None, max
         event.app.exit(result=None)
 
     layout = Layout(HSplit([
-        Window(FormattedTextControl(render), dont_extend_height=True),
-        Window(BufferControl(query, input_processors=[BeforeInput(" filter: ", style="fg:ansicyan")]), height=1),
+        Window(FormattedTextControl(render_top), dont_extend_height=True),
+        Window(BufferControl(query, input_processors=[SearchRow()]), height=1, dont_extend_height=True),
+        Window(FormattedTextControl(render_rows), dont_extend_height=True),
     ]), focused_element=query)
     app = Application(layout=layout, key_bindings=merge_key_bindings([load_key_bindings(), kb]),
-                      full_screen=False, erase_when_done=True, mouse_support=False)
+                      full_screen=False, erase_when_done=True, mouse_support=False,
+                      style=Style.from_dict(get_dialog_style(ACTIVE_THEME)))
     try:
         return app.run()
     except (EOFError, KeyboardInterrupt):

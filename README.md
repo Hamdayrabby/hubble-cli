@@ -111,7 +111,14 @@ pipx upgrade hubble-cli
 # or: pip install -U hubble-cli
 ```
 
-Hubble inspects PyPI for updates at most once daily. Set `"update_check": false` in your configuration to disable checks.
+Hubble inspects PyPI for updates at most once daily. When a new release is out, the home
+screen shows a quiet `/update to install vX.Y.Z` hint right above the prompt box. Inside
+Hubble, type:
+
+- `/update` — show the version you are on vs. the latest, and the command to upgrade
+- `/update yes` — upgrade immediately, then restart Hubble
+
+Set `"update_check": false` in your configuration to disable checks.
 
 ---
 
@@ -194,7 +201,7 @@ hubble -p "identify the CSS alignment defect" --image screenshot.png
 
 # In interactive REPL
 # 1. Type: "Analyze this layout @screenshot.png"
-# 2. Or press Alt+V to paste an image directly from your clipboard
+# 2. Or press Ctrl+V (or Alt+V where the terminal keeps Ctrl+V) to paste an image
 ```
 
 ---
@@ -713,7 +720,7 @@ usage: hubble [-h] [-p] [-c] [-r [ID]] [-m MODEL] [--provider PROVIDER]
 ### Keyboard Shortcuts
 
 - `Shift+Tab`: Cycle through permission modes.
-- `Alt+V`: Paste image from system clipboard.
+- `Ctrl+V` / `Alt+V`: Paste an image from the system clipboard. On Windows Terminal, Ctrl+V now works via the empty bracketed-paste detection (image-only clipboard sends empty paste); Alt+V remains the fallback when the terminal reserves Ctrl+V for text paste.
 - `@path`: Autocomplete and attach file content, directory trees, or images.
 - `!command`: Execute a shell command directly on the host machine.
 - `#note`: Append a persistent development note to `./HUBBLE.md`.

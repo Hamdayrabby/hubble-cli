@@ -100,3 +100,9 @@ class UpdateChecker:
         self.announced = True
         return (f"Update available: hubble {__version__} → {self.latest}. "
                 f"Run: {upgrade_command()}")
+
+    def get_banner_text(self) -> Optional[str]:
+        """One-line hint for the home screen / prompt area, in the OpenCode style."""
+        if not self.latest or not is_newer(self.latest):
+            return None
+        return f"/update to install v{self.latest}"

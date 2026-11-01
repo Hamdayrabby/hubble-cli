@@ -296,13 +296,44 @@ class Agent:
         self._append({"role": "user", "content": user_content(content, images)})
 
     def effective_context_window(self) -> int:
-        if not self.settings.get("context_window_auto", True):
-            return int(self.settings.get("context_window", 128000)) or 1
+        """Size of the model's context window, in tokens (the context meter's divisor).
+
+        Resolution order: a context length published by the provider for this exact
+        model (from the `/models` scan cache — most gateways don't publish one;
+        OpenRouter and a few others do) is honored over the generic name-based table.
+        The name table is a static approximation: e.g. DeepSeek-V4.1 served under a
+        gateway-specific name would read 64k from the "deepseek" catch-all while the
+        real model supports 1M tokens. Memoized per (settings, provider, model):
+        the toolbar calls this on every render and one branch may read a file."""
+        auto = bool(self.settings.get("context_window_auto", True))
         explicit = self.settings.get("context_window")
-        if explicit and explicit != 128000:
-            return int(explicit)
-        from hubble.settings import detect_context_window
-        return detect_context_window(self.model, default=128000)
+        key = (auto, explicit, self.provider_name, self.model)
+        hit = getattr(self, "_ctx_window_memo", None)
+        if hit and hit[0] == key:
+            return hit[1]
+        if not auto:
+            window = int(explicit or 128000) or 1
+        elif explicit and explicit != 128000:
+            window = int(explicit)
+        else:
+            from hubble.settings import detect_context_window
+            window = self._published_context_window() or \
+                detect_context_window(self.model, default=128000)
+        self._ctx_window_memo = (key, window)
+        return window
+
+    def _published_context_window(self) -> int:
+        """context_length the provider reported for exactly this model (0 = unknown)."""
+        if not self.provider_name:
+            return 0
+        try:
+            from hubble.providers import provider_models
+            for entry in provider_models(self.provider_name):
+                if entry.get("model") == self.model:
+                    return int(entry.get("context_length") or 0)
+        except Exception:
+            return 0
+        return 0
 
     def context_ratio(self) -> float:
         window = self.effective_context_window()
@@ -715,7 +746,12 @@ class Agent:
         prompt_toks = result.usage.get("prompt_tokens")
         completion_toks = result.usage.get("completion_tokens")
         if prompt_toks is None:
+            # No published usage: approximate the next request's size. It carries the
+            # transcript, the system prompt AND the tool schemas.
             prompt_toks = estimate_messages(self.messages) + estimate_tokens(self.system_prompt())
+            schemas = json.dumps([t.schema() for t in self.active_tools()])
+            if schemas != "[]":
+                prompt_toks += estimate_tokens(schemas)
         if completion_toks is None:
             completion_toks = estimate_tokens(result.text + result.reasoning) + sum(
                 estimate_tokens(c.arguments) for c in result.tool_calls)
@@ -1377,7 +1413,7 @@ class DefineSubagentTool(Tool):
             "tools": {"type": "array", "items": {"type": "string"}, "description": "Optional tool restriction list"},
             "model": {"type": "string", "description": "Optional model override for this subagent"},
             "scope": {"type": "string", "enum": ["project", "user"], "description": "project (.hubble/agents/) or user (~/.hubble/agents/). Default: project"},
-            "color": {"type": "string", "description": "Color highlight for this agent badge/name (e.g. 'magenta', 'cyan', 'green', 'yellow', 'blue', 'red')"},
+            "color": {"type": "string", "description": "Color highlight for this agent badge/name (e.g. 'yellow', 'green', 'orange', 'red')"},
             "fork_context": {"type": "boolean", "description": "Whether this subagent automatically inherits/forks parent conversation context"},
         },
         "required": ["name", "description", "system_prompt"],

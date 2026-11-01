@@ -145,7 +145,7 @@ def render(rows: List[Dict[str, Any]], days: Optional[float] = None):
 
     if not rows:
         return Text("No usage recorded yet" + (f" in the last {days:g} days" if days else "") + ".", style="dim")
-    t = Table(box=None, padding=(0, 1), header_style="bold #8787af", pad_edge=False)
+    t = Table(box=None, padding=(0, 1), header_style="bold #8f8f8f", pad_edge=False)
     t.add_column("model", overflow="fold", ratio=3)
     for col in ("tasks ok", "calls ok", "errors", "tok/s", "1st tok", "tokens", "cost"):
         t.add_column(col, justify="left" if col == "errors" else "right", no_wrap=col != "errors")
@@ -165,7 +165,7 @@ def render(rows: List[Dict[str, Any]], days: Optional[float] = None):
         cost = "-" if r["cost"] is None else f"${r['cost']:.2f}"
         if r["cost"] is not None:
             total_cost, any_cost = total_cost + r["cost"], True
-        t.add_row(Text(r["model"], style="bold #00d7ff").append(f" {r['provider']}", style="dim"), tasks,
+        t.add_row(Text(r["model"], style="bold #ffd75f").append(f" {r['provider']}", style="dim"), tasks,
                   f"{r['ok_calls']}/{r['calls']}", Text(errs, style="yellow" if r["errors"] else "dim"),
                   "-" if r["tok_per_s"] is None else f"{r['tok_per_s']:.1f}",
                   "-" if r["median_ttft_ms"] is None else f"{r['median_ttft_ms'] / 1000:.1f}s",

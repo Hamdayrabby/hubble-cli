@@ -8,6 +8,7 @@ from rich.markup import escape
 from rich.text import Text
 
 NAME = "Hubble"
+CONTENT_MAX = 100   # width of the centered content column (kept in sync with hubble.theme)
 
 # "ANSI Shadow" style letters, 6 rows each.
 _LETTERS = {
@@ -18,7 +19,7 @@ _LETTERS = {
     "E": ["███████╗", "██╔════╝", "█████╗  ", "██╔══╝  ", "███████╗", "╚══════╝"],
 }
 
-GRADIENT = [(0, 215, 255), (95, 135, 255), (175, 95, 255), (255, 95, 215)]  # cyan -> violet -> pink
+GRADIENT = [(255, 255, 255), (255, 238, 170), (255, 210, 102), (255, 183, 77)]  # white -> gold
 
 
 def _logo_rows(word: str = NAME.upper()) -> List[str]:
@@ -81,7 +82,7 @@ def gradient_logo() -> Text:
 
 def small_logo() -> Text:
     """Tiny one-liner used in /home fallback and very short terminals."""
-    out = Text("▲ ", style="bold #5f87ff")
+    out = Text("▲ ", style="bold #ffd75f")
     for i, ch in enumerate(NAME):
         out.append(ch, style=f"bold {_blend(GRADIENT, i / (len(NAME) - 1))}")
     return out
@@ -96,7 +97,7 @@ def wordmark_logo(version: str = "", t: float = 0.0) -> List[Text]:
     """
     # Line 1: ▲ spaceship icon + gradient letters with thin-space letter spacing for presence
     line1 = Text()
-    line1.append("▲ ", style="bold #5f87ff")   # spaceship icon, cyan start of gradient
+    line1.append("▲ ", style="bold #ffd75f")   # spaceship icon, white start of gradient
     word = NAME.upper()
     for i, ch in enumerate(word):
         shade = _blend(GRADIENT, ((i / max(len(word) - 1, 1)) + t * 0.07) % 1.0)
@@ -105,7 +106,7 @@ def wordmark_logo(version: str = "", t: float = 0.0) -> List[Text]:
             line1.append("\u2009", style="")   # thin space between letters: premium wordmark feel
     # Line 2: italic dim tagline + version
     ver = f"  v{version}" if version else ""
-    line2 = Text.from_markup(f"[italic #6a6a8a]your model hub for code[/italic #6a6a8a][dim]{ver}[/dim]")
+    line2 = Text.from_markup(f"[italic #8f8f8f]your model hub for code[/italic #8f8f8f][dim]{ver}[/dim]")
     return [line1, line2]
 
 
@@ -167,9 +168,9 @@ FPS = 60
 
 # Three parallax layers: (count per 100 columns, speed in columns per second, glyphs, colors dim/bright)
 STAR_LAYERS = [
-    (9, 1.5, ".", ("#303044", "#4a4a66")),
-    (5, 4.0, "·+", ("#5a5a7a", "#8a8aa8")),
-    (2, 9.0, "✦*", ("#9a9ab8", "#ffffff")),
+    (9, 1.5, ".", ("#303030", "#4a4a4a")),
+    (5, 4.0, "·+", ("#5a5a5a", "#8a8a8a")),
+    (2, 9.0, "✦*", ("#9a9a9a", "#ffffff")),
 ]
 
 
@@ -197,14 +198,14 @@ def _telescope_style(ch: str, c: int, t: float, art: _Art) -> str:
         # A glint of sunlight sweeps across the solar panels.
         glint = (t * 14) % (art.width + 20) - 10
         d = abs(c - glint)
-        return "bold #d7e7ff" if d < 1 else "#87afff" if d < 3 else "#5f87ff"
+        return "bold #fff7d6" if d < 1 else "#ffe08a" if d < 3 else "#ffd75f"
     if ch == "▪":
         return "#ffaf00" if int(t * 2 + c) % 3 else "bold #ffd75f"   # blinking status lights
     if ch == "◯":
         pulse = (math.sin(t * 5) + 1) / 2
         return "bold #fff3b0" if pulse > 0.66 else "bold #ffd75f" if pulse > 0.33 else "#d7af00"
     if ch == "═":
-        return "#87afd7"
+        return "#a89a72"
     if ch.isalpha():
         return f"bold {_blend(GRADIENT, c / art.width)}"
     return "#bcbcbc"
@@ -232,10 +233,10 @@ def _mix(dim: str, bright: str, w: float) -> str:
     return out
 
 
-_SPACE = "#101018"  # color a star fades to as it leaves a cell
+_SPACE = "#101010"  # color a star fades to as it leaves a cell
 
 
-def _draw_stars(grid, t: float, row_start: int = 0, row_end: Optional[int] = None):
+def _draw_stars(grid, t: float, row_start: int = 0, row_end: Optional[int] = None, space: Optional[str] = None):
     """Parallax starfield: stars drift left, nearer layers faster.
 
     Terminal cells are coarse, so each star is anti-aliased across the two cells it straddles:
@@ -248,6 +249,7 @@ def _draw_stars(grid, t: float, row_start: int = 0, row_end: Optional[int] = Non
     if r_end <= r_start:
         return
     span = r_end - r_start
+    fade = space or _SPACE   # stars fade into the page background, so they never glow from a seam
     for x, row, speed, glyph, colors, phase in _stars(width, span):
         target_row = r_start + row
         if target_row >= r_end:
@@ -259,7 +261,7 @@ def _draw_stars(grid, t: float, row_start: int = 0, row_end: Optional[int] = Non
         color = _mix(colors[0], colors[1], twinkle)
         for c, w in ((c0, 1 - frac), ((c0 + 1) % width, frac)):
             if w > 0.2 and grid[target_row][c][0] == " ":
-                grid[target_row][c] = (glyph, _mix(_SPACE, color, w))
+                grid[target_row][c] = (glyph, _mix(fade, color, w))
 
 
 def _draw_comet(grid, row: int, t: float, period: float = 6.0):
@@ -267,7 +269,7 @@ def _draw_comet(grid, row: int, t: float, period: float = 6.0):
     ct = (t % period) / 1.2
     if ct < 1:
         head = int(width * (1 - ct))
-        for k, (ch, st) in enumerate((("●", "bold #ffffff"), ("━", "#d7d7ff"), ("━", "#8787af"), ("─", "#5f5f87"))):
+        for k, (ch, st) in enumerate((("●", "bold #ffffff"), ("━", "#fff7d6"), ("━", "#ffd75f"), ("─", "#d7b055"))):
             if 0 <= head + k < width:
                 grid[row][head + k] = (ch, st)
 
@@ -312,14 +314,27 @@ def _draw_scene(grid, top: int, t: float, art: _Art):
                 grid[beam_row][c] = ("•" if phase == 0 else "·", "bold #ffd75f" if phase == 0 else "#af8700")
 
 
-def _grid_text(grid) -> Text:
+def _grid_text(grid, bg: str = "") -> Text:
     out = Text()
     for i, row in enumerate(grid):
         for ch, style in row:
+            if (not style) and bg:
+                style = f"on {bg}"      # paint the page background under empty cells too
             out.append(ch, style=style or None)
         if i < len(grid) - 1:
             out.append("\n")
     return out
+
+
+def canvas_bg() -> str:
+    """Whole-canvas background while the home screen shows: true black for the 'black' theme."""
+    try:
+        from hubble.ui import ACTIVE_THEME
+        if ACTIVE_THEME == "black":
+            return "#000000"
+    except Exception:
+        pass
+    return ""
 
 
 def space_scene(width: int, t: float = 2.4, art: _Art = FULL) -> Text:
@@ -338,8 +353,8 @@ def space_scene(width: int, t: float = 2.4, art: _Art = FULL) -> Text:
 # fired so far in the current wave, so any frame can be drawn on its own.
 
 INVADERS = [  # (frame A, frame B, color); one row each, top to bottom
-    ("▞█▚", "▚█▞", "#ff5fd7"),
-    ("▛▀▜", "▙▄▟", "#00d7ff"),
+    ("▞█▚", "▚█▞", "#ffd75f"),
+    ("▛▀▜", "▙▄▟", "#5fd787"),
 ]
 _SHIP_ROWS = [
     "▲",
@@ -464,7 +479,7 @@ class _Arcade:
                 if ch == " " and r != name_row:
                     continue
                 if ch == "▲":
-                    style = "bold #ffffff" if int(t * 6) % 2 else "bold #d7e7ff"
+                    style = "bold #ffffff" if int(t * 6) % 2 else "bold #fff7d6"
                 elif ch == "▼":
                     ch = ("▼", "▽", "▾")[(flame + j) % 3]
                     style = ("bold #ffd75f", "#ff8700", "#ff5f00")[(flame + j) % 3]
@@ -473,9 +488,9 @@ class _Arcade:
                 elif r == name_row and ch == " ":
                     style = ""  # opaque inside the hull, so stars pass behind the ship
                 elif ch in "◢◣":
-                    style = "#ff5f87"  # wing-tip lights
+                    style = "#5fd787"  # wing-tip lights
                 else:
-                    style = "#afc7e7" if r < name_row else "#5f87af"
+                    style = "#d7c9a8" if r < name_row else "#a89a72"
                 put(5 + r, sx + j, ch, style)
 
 
@@ -521,41 +536,49 @@ def _stamp_text(grid, row: int, col: int, text: Text):
 
 def home_info_lines(*, version: str, provider: str, model: str, mode: str, root: str, session_id: Optional[str],
                     memory_files: List[str], model_count: Optional[int], provider_count: int, resumable: int,
-                    show_provider: bool, scan_note: str = "") -> Tuple[List[Text], List[Text]]:
-    """(status lines, tip lines) as rich Text, shared by the static and animated home screens."""
-    via = f"[dim]{escape(provider)}[/dim] · " if show_provider else ""
-    if scan_note:
-        count = f" [dim]({escape(scan_note)})[/dim]"
-    else:
-        count = f" [dim]({model_count} models)[/dim]" if model_count else ""
-    mode_color = {"default": "white", "accept-edits": "green", "plan": "blue", "yolo": "red"}.get(mode, "white")
-    status = [f"[bold]model  [/bold]  {via}[#00d7ff]{escape(model)}[/#00d7ff]{count}",
-              f"[bold]mode   [/bold]  [{mode_color}]{mode}[/{mode_color}] [dim](Shift+Tab to change)[/dim]",
-              f"[bold]cwd    [/bold]  {escape(root)}"]
-    if session_id:
-        status.append(f"[bold]session[/bold]  [dim]{session_id}[/dim]")
+                    show_provider: bool, scan_note: str = "", update_banner: str = "") -> Tuple[List[Text], List[Text]]:
+    """(status lines, tip lines) as rich Text, shared by the static and animated home screens.
 
-    tip_lines = [
-        Text.from_markup("[dim]Type [bold white]/[/bold white] for commands · [bold white]@[/bold white] to attach files · [bold white]Shift+Tab[/bold white] to cycle modes[/dim]"),
-    ]
+    The status list is always empty: model, provider, mode, cwd and session are already
+    shown by the prompt panel's metadata row and the footer directly below the home screen
+    (OpenCode's home is just logo + hint), so repeating them here only duplicated text.
+    Model-scan progress keeps a small dim tip line instead. The kwargs stay part of the
+    signature because callers build the info dict generically."""
+    tip_lines = []
+    if update_banner:
+        # One quiet, centered hint above the input, in the OpenCode style:
+        # "/update to install vX.Y.Z"
+        pad = max(0, (CONTENT_MAX - len(update_banner)) // 2)
+        tip_lines.append(Text.from_markup(
+            f"{' ' * pad}[bold #ffd75f]{escape(update_banner)}[/bold #ffd75f]"))
+    if scan_note:
+        tip_lines.append(Text.from_markup(f"[dim]{escape(scan_note)}[/dim]"))
+    tip_lines.append(Text.from_markup("[dim]Type [bold white]/[/bold white] for commands · [bold white]@[/bold white] to attach files · [bold white]Shift+Tab[/bold white] to cycle modes[/dim]"))
     if memory_files:
         tip_lines.append(Text.from_markup(f"[dim]Project memory active: [bold white]{escape(', '.join(memory_files))}[/bold white][/dim]"))
     elif resumable:
         tip_lines.append(Text.from_markup(f"[dim]Run [bold white]/resume[/bold white] to continue an earlier session ({resumable} available)[/dim]"))
     else:
         tip_lines.append(Text.from_markup("[dim]Run [bold white]/init[/bold white] to create HUBBLE.md (project memory)[/dim]"))
-    return [Text.from_markup(s) for s in status], tip_lines
+    return [], tip_lines
 
 
 def compose_home(width: int, height: int, t: float, status: List[Text], tips: List[Text], version: str,
-                 logo_style: Optional[str] = None) -> Text:
-    return _grid_text(compose_grid(width, height, t, status, tips, version, logo_style=logo_style))
+                 logo_style: Optional[str] = None, bg: str = "") -> Text:
+    return _grid_text(compose_grid(width, height, t, status, tips, version, logo_style=logo_style,
+                                   space=bg or None), bg=bg)
 
 
 def compose_home_fragments(width: int, height: int, t: float, status: List[Text], tips: List[Text],
-                           version: str, logo_style: Optional[str] = None) -> List[Tuple[str, str]]:
-    """Same frame as prompt_toolkit fragments: no ANSI round trip, same-style runs merged."""
-    return _grid_fragments(compose_grid(width, height, t, status, tips, version, logo_style=logo_style))
+                           version: str, logo_style: Optional[str] = None, bg: str = "", pad: int = 0) -> List[Tuple[str, str]]:
+    """Same frame as prompt_toolkit fragments: no ANSI round trip, same-style runs merged.
+
+    `bg` paints the page background across every cell of every row, and `pad` extends each
+    row with background-only cells to the right edge of the terminal, so the home screen
+    covers the full canvas edge-to-edge (OpenCode-style) with no seams."""
+    return _grid_fragments(compose_grid(width, height, t, status, tips, version, logo_style=logo_style,
+                                        space=bg or None),
+                           bg=bg, pad=pad)
 
 
 _PT_STYLES: dict = {}
@@ -619,12 +642,18 @@ def _pt_style(style: Any) -> str:
     return out
 
 
-def _grid_fragments(grid) -> List[Tuple[str, str]]:
+def _grid_fragments(grid, bg: str = "", pad: int = 0) -> List[Tuple[str, str]]:
     frags: List[Tuple[str, str]] = []
+    bgstyle = f"bg:{bg}" if bg else ""
     for row in grid:
         cur, buf = None, []
         for ch, st in row:
-            s = _pt_style(st) if ch != " " else ""
+            if st:
+                s = _pt_style(st)
+                if bg and s:
+                    s = f"bg:{bg} {s}"     # every glyph carries the page background too
+            else:
+                s = bgstyle                # background-only cells (spaces) paint the page
             if s != cur and buf:
                 frags.append((cur or "", "".join(buf)))
                 buf = []
@@ -632,17 +661,22 @@ def _grid_fragments(grid) -> List[Tuple[str, str]]:
             buf.append(ch)
         if buf:
             frags.append((cur or "", "".join(buf)))
+        if pad > 0 and bg:
+            frags.append((bgstyle, " " * pad))   # fill to the right edge of the terminal
         frags.append(("", "\n"))
     return frags
 
 
 def compose_grid(width: int, height: int, t: float, status: List[Text], tips: List[Text], version: str,
-                 logo_style: Optional[str] = None):
+                 logo_style: Optional[str] = None, space: Optional[str] = None):
     """Whole home screen on one animated starfield: logo, scene, status and tips.
 
     Picks the richest layout that fits `height` rows, dropping tips, then shrinking the scene,
     then the logo, so it also works in short terminals such as VS Code's panel.
+    `space` overrides the color stars fade into (the page background), so the animation
+    never glows from a lighter seam color.
     """
+    space = space or _SPACE
     width = max(40, min(width - 1, 110))
     height = max(height, 1)
     # Logo sizes:
@@ -709,7 +743,7 @@ def compose_grid(width: int, height: int, t: float, status: List[Text], tips: Li
                 if 2 + c < width:
                     shade = _blend(GRADIENT, ((c / max(lw - 1, 1)) + t * 0.08) % 1.0)
                     grid[row + r][2 + c] = (ch, (shade if ch == "█" else f"{shade} dim") if ch != " " else "")
-        _stamp_text(grid, row + len(logo), 4, Text.assemble(("your model hub for code", "italic #8787af"),
+        _stamp_text(grid, row + len(logo), 4, Text.assemble(("your model hub for code", "italic #8f8f8f"),
                                                     ("   v" + version, "dim")))
     elif logo_mode_use == "block":
         logo = _logo_rows()
@@ -720,7 +754,7 @@ def compose_grid(width: int, height: int, t: float, status: List[Text], tips: Li
                 if 2 + c < width:
                     shade = _blend(GRADIENT, ((c / max(lw - 1, 1)) + t * 0.08) % 1.0)
                     grid[row + r][2 + c] = (ch, (shade if ch == "█" else f"{shade} dim") if ch != " " else "")
-        _stamp_text(grid, row + len(logo), 4, Text.assemble(("your model hub for code", "italic #8787af"),
+        _stamp_text(grid, row + len(logo), 4, Text.assemble(("your model hub for code", "italic #8f8f8f"),
                                                     ("   v" + version, "dim")))
     elif logo_mode_use == "word":
         wm = wordmark_logo(version, t)
@@ -731,11 +765,11 @@ def compose_grid(width: int, height: int, t: float, status: List[Text], tips: Li
     row += logo_h + 1
 
     if art is ARCADE:
-        _draw_stars(grid, t, row_start=row, row_end=row + ARCADE.height)
+        _draw_stars(grid, t, row_start=row, row_end=row + ARCADE.height, space=space)
         ARCADE.draw(grid, row, t)
         row += ARCADE.height + 1
     elif isinstance(art, _Art):
-        _draw_stars(grid, t, row_start=row, row_end=row + art.height)
+        _draw_stars(grid, t, row_start=row, row_end=row + art.height, space=space)
         _draw_comet(grid, row, t)
         _draw_scene(grid, row, t, art)
         row += art.height + 1
@@ -759,10 +793,12 @@ def to_ansi(text: Text, width: int) -> str:
     return con.file.getvalue()
 
 
-def render_home(console: Console, *, animate: bool = False, logo_style: Optional[str] = None, **info):
+def render_home(console: Console, *, animate: bool = False, logo_style: Optional[str] = None, bg: str = "", **info):
     """Static home screen (non-interactive terminals, /home fallback)."""
     status, tips = home_info_lines(**info)
     height = console.height if console.is_terminal else 200
+    width = min(console.width, CONTENT_MAX)   # the content column: ShiftedConsole centers the rest
     console.print()
-    console.print(compose_home(console.width, max(height - 3, 12), 2.4, status, tips, info["version"], logo_style=logo_style))
+    console.print(compose_home(width, max(height - 3, 12), 2.4, status, tips, info["version"],
+                               logo_style=logo_style, bg=bg))
     console.print()

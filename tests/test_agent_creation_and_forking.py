@@ -314,7 +314,7 @@ def test_repl_agent_command_listing_and_fork(tmp_path, monkeypatch):
     forked_def = next((d for d in agent.agent_defs if d.name == "db-optimizer"), None)
     assert forked_def is not None
     assert forked_def.fork_context is True
-    assert forked_def.color == "magenta"
+    assert forked_def.color == "green"
     assert forked_def.capability == "edit"
     assert "Optimize the database query pipeline" in forked_def.prompt
     assert "Optimize the database query pipeline" in forked_def.description

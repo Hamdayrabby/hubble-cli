@@ -31,6 +31,15 @@ def test_probe_counts_length_cutoff_as_available():
     assert r["available"] is True
 
 
+def test_probe_handles_content_returned_as_parts():
+    def handler(req):
+        return httpx.Response(200, json={"choices": [{"message": {
+            "role": "assistant", "content": [{"type": "text", "text": "hi there"}]}, "finish_reason": "stop"}]})
+    with client_for(handler) as c:
+        r = _probe(c, BASE, {}, "m", 5)
+    assert r["available"] is True and r["sample"] == "hi there"
+
+
 def test_probe_marks_rate_limit_and_timeout_transient_but_404_not():
     with client_for(lambda req: httpx.Response(429)) as c:
         assert _probe(c, BASE, {}, "m", 5)["transient"] is True
@@ -153,17 +162,22 @@ def test_home_screen_model_line_follows_scan(tmp_path, monkeypatch):
     sc.status, sc.done, sc.total = "running", 10, 295
     sc._thread = type("T", (), {"is_alive": lambda self: True})()
     repl.scanners["hubble"] = sc
+
+    def tips_text():
+        return "\n".join(t.plain for t in repl._home[1])   # scan progress lives in the tips now
+
     repl._sync_scan_visuals()
-    assert "scanning models 10/295" in repl._home[0][0].plain
+    assert "scanning models 10/295" in tips_text()
 
     sc.done = 20
     repl._sync_scan_visuals()
-    assert "20/295" in repl._home[0][0].plain
+    assert "20/295" in tips_text()
 
     sc.status, sc._thread = "done", None
     repl._unannounced.add("hubble")
     repl._sync_scan_visuals()
-    assert "(1 models)" in repl._home[0][0].plain
+    assert "scanning models" not in tips_text()
+    assert not repl._home[0]   # no status block: the panel + footer already show model/mode/cwd
 
 
 def test_provider_models_shows_transient_as_unknown(tmp_path, monkeypatch):
