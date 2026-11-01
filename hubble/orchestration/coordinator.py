@@ -97,6 +97,8 @@ class Coordinator:
             if wt_name:
                 status = worktree.status(cwd)
                 record.changed_files = [ln[3:] for ln in status["dirty"].splitlines() if ln.strip()]
+                record.detail.setdefault("porcelain", status["dirty"][:4000])
+                record.detail.setdefault("diffstat", status["diffstat"][:2000])
         except Exception as exc:  # adapter/registry/worktree errors stay visible
             record.status = "failed"
             record.failure_class = classify(stderr_tail=str(exc)) or "adapter_error"

@@ -69,7 +69,7 @@ def test_orchestrate_run_fake_end_to_end(repo):
     assert (repo / ".hubble" / "runs.jsonl").is_file()
     record = json.loads((repo / ".hubble" / "runs.jsonl").read_text().splitlines()[-1])
     assert record["record"]["status"] == "succeeded"
-    assert record["record"]["branch"] == "hubble/orch-impl"
+    assert record["record"]["branch"].startswith("hubble/orch-impl-")
 
 
 def test_main_orchestrate_list_runtimes(tmp_path, capsys):

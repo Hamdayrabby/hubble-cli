@@ -43,6 +43,7 @@ def test_writer_gets_worktree_and_base_sha(repo):
     assert len(record.base_sha) == 40
     assert record.branch.startswith("hubble/orch-impl-")
     assert "orch-impl-" in record.worktree_path
+    assert "porcelain" in record.detail and "diffstat" in record.detail
     assert record.detail["events"] >= 3 and record.detail["tail"] != []
 
 
