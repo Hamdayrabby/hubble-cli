@@ -296,6 +296,19 @@ def test_close_removes_prompt_file(tmp_path, fake_cli):
     assert not prompt_path.exists()
 
 
+def test_prompt_file_lives_beside_the_run_and_is_cleaned(tmp_path, fake_cli, monkeypatch):
+    import tempfile
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    adapter = MuseCodeAdapter()
+    handle = adapter.start(_spec(tmp_path))
+    prompt_path = Path(fake_cli.created[0].argv[
+        fake_cli.created[0].argv.index("--prompt-file") + 1])
+    assert prompt_path.parent == tmp_path / ".hubble" / "prompts"
+    list(adapter.stream(handle))
+    assert not prompt_path.exists()
+    assert list(tmp_path.rglob("muse-code-prompt-*.md")) == []
+
+
 def test_stream_removes_prompt_file_without_explicit_close(tmp_path, fake_cli):
     fake_cli.script = [json.dumps({"type": "text", "text": "hi"})]
     adapter = MuseCodeAdapter()
@@ -305,4 +318,4 @@ def test_stream_removes_prompt_file_without_explicit_close(tmp_path, fake_cli):
     assert prompt_path.is_file()
     list(adapter.stream(handle))
     assert not prompt_path.exists()
-    assert tmp_path not in prompt_path.parents
+    assert prompt_path.parent == tmp_path / ".hubble" / "prompts"

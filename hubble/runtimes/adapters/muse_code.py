@@ -32,7 +32,6 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Tuple
 
 from hubble.runtimes.adapters._proc import ProcRun, find_executable, probe_version
-from hubble.settings import HOME_DIR
 from hubble.runtimes.events import EventSequencer, RuntimeEvent
 from hubble.runtimes.protocol import (
     DetectResult,
@@ -193,19 +192,14 @@ class MuseCodeAdapter:
 
     @staticmethod
     def _prompt_dir(spec: RunSpec) -> Path:
-        cwd = Path(spec.cwd).resolve()
-        for cand in (HOME_DIR / "prompts",
-                     Path(tempfile.gettempdir()) / "hubble-prompts"):
-            try:
-                if cand.resolve() == cwd or cwd in cand.resolve().parents:
-                    continue
-                cand.mkdir(parents=True, exist_ok=True)
-                return cand
-            except OSError:
-                continue
-        fallback = cwd / ".hubble" / "prompts"
-        fallback.mkdir(parents=True, exist_ok=True)
-        return fallback
+        # The prompt file lives next to the run (cwd/.hubble/prompts): the
+        # only directory the adapter is guaranteed to own and write. HOME
+        # and system-temp locations proved unreliable (denied or blocking
+        # file creation in sandboxed runs; degenerate tempdirs pointing at
+        # the checkout). close() removes the file; the coordinator calls it.
+        prompt_dir = Path(spec.cwd) / ".hubble" / "prompts"
+        prompt_dir.mkdir(parents=True, exist_ok=True)
+        return prompt_dir
 
     def _write_prompt_file(self, spec: RunSpec) -> str:
         # Never the process cwd: tempfile falls back to cwd on some Windows
