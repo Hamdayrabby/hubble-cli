@@ -52,8 +52,11 @@ class ShiftedConsole(Console):
             super().print(Padding(renderables[0], (0, right, 0, left)), **kwargs)
         else:
             # rich Groups would merge these into one renderable and lose per-arg
-            # markup/behaviour; leave multi-arg prints unpadded instead.
-            super().print(*renderables, **kwargs)
+            # markup/behaviour; pad and print the args one at a time instead — they
+            # keep their identity AND the content column (an unpadded multi-arg print
+            # is exactly what paints flush-left transcript rows).
+            for r in renderables:
+                super().print(Padding(r, (0, right, 0, left)), **kwargs)
 
 
 console = ShiftedConsole(highlight=False)
@@ -546,6 +549,7 @@ class ReplEvents(Events):
             count = self.tool_calls_this_turn
             word = "tool call" if count == 1 else "tool calls"
             console.print(f"[dim]● {count} {word}[/dim]")
+            console.print()      # gap between the summary and what follows
             self.tool_summary_shown = True
 
     def turn_start(self):
@@ -578,6 +582,7 @@ class ReplEvents(Events):
             self.last_thinking = self.accordion.get_full_text()
         self._end_reasoning()
         if not self.answer_started:
+            console.print()          # gap between the committed prompt and the reply
             self._show_tool_summary_if_needed()
             self.answer_started = True
         if self.md:

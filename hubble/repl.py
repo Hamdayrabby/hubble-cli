@@ -35,7 +35,7 @@ from hubble.session import SessionStore
 from hubble.settings import HOME_DIR, save_user_setting
 from hubble.skills import Skill, TEMPLATE, discover_skills
 from hubble.tools import is_secret_path, truncate
-from hubble.theme import CONTENT_MAX
+from hubble.theme import anchor_session_columns, content_margins
 from hubble.ui import console, pick, render_todos
 
 MENTION_RX = re.compile(r"(?<![\w@])@([\w./\\:-]+)")
@@ -695,16 +695,22 @@ class Repl:
 
     def _geo(self, cols: Optional[int] = None) -> Tuple[int, int]:
         """(left margin, panel width): the panel column centered in the terminal, so the
-        whole app (panel, info row, footer, transcript) sits in the middle like OpenCode."""
+        whole app (panel, info row, footer, transcript) sits in the middle like OpenCode.
+
+        Uses the shared session anchor (hubble.theme): margins frozen at the app's first
+        render, so a session launched small and enlarged later keeps one column instead of
+        painting newer content at a fresher margin than the committed scrollback."""
         if cols is None:
             try:
                 from prompt_toolkit.application import get_app
-                cols = get_app().output.get_size().columns
+                app = get_app()
+                cols = app.output.get_size().columns
+                if getattr(app, "is_running", False) or getattr(app, "app_running", False):
+                    anchor_session_columns(cols)   # a live render pins the session column
             except Exception:
                 from shutil import get_terminal_size
                 cols = get_terminal_size((80, 24)).columns
-        width = max(40, min(cols, CONTENT_MAX))
-        return max(0, (cols - width) // 2), width
+        return content_margins(int(cols))
 
     def _bar_continuation(self, width: int, line_number: int, wrap_count: int):
         """prompt continuation for wrapped/multiline input lines: keep the panel's accent
@@ -769,6 +775,13 @@ class Repl:
         """The accent bar + four cells of padding in front of the typed text."""
         left, _ = self._geo()
         return [("", " " * left), ("class:box.bar", self.BAR), ("", "    ")]
+
+    def _page_pad_row(self, bg: str = "") -> List[Tuple[str, str]]:
+        """One blank breathing row inside the box (accent bar + panel/page background):
+        the padding above and below the input text that OpenCode's box has."""
+        left, width = self._geo()
+        style = f"bg:{bg}" if bg else "class:box.bg"
+        return [("", " " * left), ("class:box.bar", self.BAR), (style, " " * (width - 1))]
 
     MENU_MAX_ROWS = 12   # dropdown rows visible at once: a tall palette, not a sliver
 
@@ -1202,10 +1215,10 @@ class Repl:
             typed = app.current_buffer.text
         except Exception:
             return HTML("<box.bar>┃</box.bar>  ")
-        # Leave room for the prompt panel (spacer + input + pad + metadata rows and the
-        # footer), plus the completion menu while typing / or @.
+        # Leave room for the prompt panel (top pad + input + bottom pad + metadata rows
+        # and the footer), plus the completion menu while typing / or @.
         toolbar = getattr(self, "_toolbar_height", 4)
-        budget = size.rows - 4 - toolbar - (10 if typed[:1] in ("/", "@") or " @" in typed else 0)
+        budget = size.rows - 5 - toolbar - (10 if typed[:1] in ("/", "@") or " @" in typed else 0)
         cached = getattr(self, "_home_frame", None)
         # When user is typing, freeze animation frame to eliminate input latency and prevent keystroke lag.
         if typed.strip() and cached is not None and cached[2] == budget and cached[3] == size.columns:
@@ -1223,17 +1236,24 @@ class Repl:
         prefix = self._input_prefix()
         if bg:
             prefix[0] = (f"bg:{bg}", prefix[0][1])   # the input row's margin is canvas too
+        pad = self._page_pad_row(bg if bg else "")   # breathing row between canvas and input
+        if bg:
+            pad[0] = (f"bg:{bg}", pad[0][1])         # pad row's margin carries the canvas too
+            pad[1] = (f"class:box.bar bg:{bg}", pad[1][1])
+            pad[2] = (f"bg:{bg}", pad[2][1])
         frame = FormattedText(_indent_frags(frags, left, style=f"bg:{bg}" if bg else "")
-                              + [("", "\n")] + prefix)
+                              + [("", "\n")] + pad + [("", "\n")] + prefix)
         self._home_frame = (fps_step, frame, budget, size.columns)
         return frame
 
     def _prompt_message(self):
-        """Prompt message: the accent-bar prefix of the input row — one row, in every state.
+        """Prompt message: a blank breathing row above the input row, then the accent-bar
+        prefix — the same two rows in idle and busy states, so the region's height never
+        changes and patch_stdout repaints stay in step.
 
         The busy preloader hovers above the box (its own layout row), so the prompt
         region's height only changes with the board/the thinking row appearing or
-        hiding, and patch_stdout repaints stay in step."""
+        hiding."""
         from prompt_toolkit.formatted_text import FormattedText
 
         events = getattr(getattr(self, "agent", None), "events", None)
@@ -1242,8 +1262,10 @@ class Repl:
             frags = board.to_formatted_text()
             if frags:
                 left, _ = self._geo()
-                return FormattedText(_indent_frags(frags, left) + [("", "\n")] + self._input_prefix())
-        return FormattedText(self._input_prefix())
+                pad = self._page_pad_row()
+                return FormattedText(_indent_frags(frags, left) + [("", "\n")] + pad
+                                     + [("", "\n")] + self._input_prefix())
+        return FormattedText(self._page_pad_row() + [("", "\n")] + self._input_prefix())
 
     def fallback_for(self, provider: str, model: str):
         choice = resolve_fallback(self.agent.settings, self.providers, provider, model)
@@ -1462,6 +1484,14 @@ class Repl:
         self.updates.start()
         self._start_worker()
         session = self._prompt_session()
+        # Freeze the session's content-column anchor from the real output: every later
+        # margin (panel, canvas, transcript) derives from this width, so a session that
+        # starts in a narrow window and gets resized later still paints in ONE column.
+        try:
+            from prompt_toolkit.application.current import get_app_session
+            anchor_session_columns(get_app_session().output.get_size().columns)
+        except Exception:
+            pass
         if initial_prompt:
             self._home = None
             self.handle(initial_prompt)

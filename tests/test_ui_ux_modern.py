@@ -546,8 +546,9 @@ def test_prompt_panel_centers_on_wide_terminals(tmp_path, monkeypatch):
     # the input row's prefix is shifted into the column
     assert repl._input_prefix() == [("", " " * 19), ("class:box.bar", "┃"), ("", "    ")]
 
-    # A blank pad row under the input line gives the box room to breathe: pad row + info
-    # row + footer live inside the same column (margin + width cells wide).
+    # A breathing pad row above the input line closes the box at the top too: pad row +
+    # input row + pad row + metadata row + dark gap + footer live inside one column
+    # (margin + width cells wide).
     tb = to_formatted_text(repl._toolbar())
     lines = fragment_list_to_text(tb).splitlines()
     assert lines[0] == " " * 19 + "┃" + " " * 99                       # pad row: bigger box
@@ -556,14 +557,14 @@ def test_prompt_panel_centers_on_wide_terminals(tmp_path, monkeypatch):
     assert lines[2] == ""                                              # dark gap between box and footer
     assert len(lines[3]) >= 119  # footer length varies with cwd
 
-    # the prompt message is the same single row in both states, so the region's height
+    # the prompt message is the same two rows in both states, so the region's height
     # never changes and prompt_toolkit never mis-erases rows above it
     idle = fragment_list_to_text(to_formatted_text(repl._prompt_message())).splitlines()
-    assert idle == [" " * 19 + "┃    "]
+    assert idle == [" " * 19 + "┃" + " " * 99, " " * 19 + "┃    "]     # top padding + input
 
     repl.is_busy = True
     busy = fragment_list_to_text(to_formatted_text(repl._prompt_message())).splitlines()
-    assert busy == [" " * 19 + "┃    "]
+    assert busy == [" " * 19 + "┃" + " " * 99, " " * 19 + "┃    "]
     busy_tb = fragment_list_to_text(to_formatted_text(repl._toolbar())).splitlines()
     assert len(busy_tb) == 4 and busy_tb[0] == " " * 19 + "┃" + " " * 99
     assert busy_tb[1].startswith(" " * 19 + "┃    ") and len(busy_tb[1]) == 121
@@ -600,6 +601,7 @@ def test_prompt_box_stays_compact_when_the_terminal_has_room(tmp_path, monkeypat
         assert buffer_windows[0].dont_extend_height()
 
         # one spacer row + one input row + four toolbar rows (pad, metadata, gap, footer)
+        # (the prompt message's rows ride on the buffer window and don't change this)
         assert session.layout.container.preferred_height(139, 24).preferred == 6
 
         class _Compact:
@@ -636,7 +638,9 @@ def test_metadata_row_never_wraps(tmp_path, monkeypatch):
 
 
 def test_transcript_prints_in_centered_column(monkeypatch):
-    """ShiftedConsole indents every printed block into the centered content column."""
+    """ShiftedConsole indents every printed block into the centered content column —
+    single-renderable prints and multi-renderable prints alike (an unpadded multi-arg
+    print is exactly what would paint flush-left transcript rows)."""
     import io
 
     buf = io.StringIO()
@@ -646,7 +650,39 @@ def test_transcript_prints_in_centered_column(monkeypatch):
     con.print("second block", "second arg")
     out = buf.getvalue()
     assert out.splitlines()[0].startswith(" " * 19 + "hello")
-    assert "second block second arg" in out.splitlines()[2]
+    assert out.splitlines()[2].startswith(" " * 19 + "second block")
+    assert out.splitlines()[3].startswith(" " * 19 + "second arg")
+
+
+def test_session_anchor_keeps_one_column_after_a_resize(monkeypatch):
+    """The app freezes the terminal width it first rendered with; from then on every
+    margin (panel AND transcript) derives from that anchor, so content painted before a
+    later resize keeps sharing one column with everything newer. A narrow session that
+    later grows still paints at the OLD left margin, never flush-left."""
+    from hubble import theme as theme_mod
+
+    # session starts in a 110-wide window: content column centered at left 5
+    theme_mod.anchor_session_columns(110)
+    assert theme_mod.content_margins(110) == (5, 100)
+
+    # the window is enlarged mid-session: margins keep the SAME column (never re-centered,
+    # never flushing left, even if a probe mis-reads the width for a moment)
+    assert theme_mod.content_margins(150) == (5, 100)
+    assert theme_mod.content_margins(500) == (5, 100)
+    # even a bogus 80-col probe cannot un-anchor the column
+    assert theme_mod.content_margins(80) == (5, 75)          # shrunk to fit, same left
+
+    # a session that starts WIDE (139) and later shrinks still fits the terminal
+    theme_mod.reset_session_anchor()
+    theme_mod.anchor_session_columns(139)
+    left, width = theme_mod.content_margins(80)
+    assert left == 19 and width == 61 and left + width <= 80
+
+    # no anchor: classic centered behavior with locked margins at the first observation
+    theme_mod.reset_session_anchor()
+    assert theme_mod.content_margins(80) == (0, 80)
+    assert theme_mod.content_margins(139) == (19, 100)
+    assert theme_mod.content_margins(110) == (5, 100)
 
 
 def test_home_and_splash_center_with_the_panel(tmp_path, monkeypatch):
@@ -675,6 +711,7 @@ def test_home_and_splash_center_with_the_panel(tmp_path, monkeypatch):
     repl._home_t0 = time.time()
     frame = fragment_list_to_text(to_formatted_text(repl._home_message())).splitlines()
     assert all(l == "" or l.startswith(" " * 19) for l in frame)      # every row indented or blank
+    assert frame[-2] == " " * 19 + "┃" + " " * 99                     # breathing row above the input
     assert frame[-1] == " " * 19 + "┃    "                             # ends on the input line
 
 

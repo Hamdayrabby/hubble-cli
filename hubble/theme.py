@@ -22,16 +22,61 @@ ASSISTANT_TITLE = "🔭 Hubble"
 
 CONTENT_MAX = 100   # width of the centered content column (panel, transcript, info rows)
 
+# Frozen session anchor: the terminal width observed at the app's FIRST render. Everything
+# (prompt panel, home canvas, transcript) derives its left margin from this one value, so
+# a session that starts in a narrower window (a small VSCode panel, a default-sized tab)
+# and is enlarged later keeps ONE visual column instead of mixing margins between the
+# scrollback painted at the old size and everything painted after the resize.
+_ANCHOR = [0]       # 0 = not frozen yet
+
+
+def anchor_session_columns(cols) -> int:
+    """Freeze the session's content-column anchor to the terminal width on FIRST call
+    (call it only from a trustworthy measurement — a live prompt_toolkit output). Later
+    resizes deliberately do NOT re-freeze it: the column stays where the session started."""
+    try:
+        cols = int(cols)
+    except (TypeError, ValueError):
+        return _ANCHOR[0]
+    if not _ANCHOR[0] and cols >= 20:
+        _ANCHOR[0] = cols
+    return _ANCHOR[0]
+
+
+def reset_session_anchor() -> None:
+    """Forget the frozen anchor (used by tests that fake different terminal sizes)."""
+    _ANCHOR[0] = 0
+
+
+def content_width_for(cols) -> int:
+    """Width of the content column inside a `cols`-wide terminal: capped at CONTENT_MAX,
+    never wider than the terminal itself (at least 40 when it fits)."""
+    room = max(0, int(cols))
+    return max(min(40, room), min(room, CONTENT_MAX))
+
 
 def content_margins(cols=None) -> Tuple[int, int]:
-    """(left margin, content width) that centers a `CONTENT_MAX`-wide column in the terminal."""
+    """(left margin, content width) that centers a `CONTENT_MAX`-wide column in the terminal.
+
+    Without a session anchor this keeps the classic centered layout. Once the app froze
+    the anchor (see `anchor_session_columns`), the LEFT margin stays where the session
+    started, so scrollback painted before any later temporary width keeps sharing ONE
+    column with everything newer; only the width follows the current terminal (shrunk to
+    fit, never re-centered)."""
     try:
         import shutil
         cols = int(cols or shutil.get_terminal_size((80, 24)).columns)
     except Exception:
         cols = 80
-    width = max(40, min(cols, CONTENT_MAX))
-    return max(0, (cols - width) // 2), width
+    cols = max(0, cols)
+    anchor = _ANCHOR[0]
+    if not anchor:
+        width = content_width_for(cols)
+        return max(0, (cols - width) // 2), width
+    anchor_width = content_width_for(anchor)
+    left0 = max(0, (anchor - anchor_width) // 2)
+    width = max(min(40, cols), min(max(0, cols - left0), CONTENT_MAX))
+    return min(left0, max(0, cols - width)), width
 
 
 @dataclass
