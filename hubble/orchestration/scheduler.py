@@ -60,6 +60,39 @@ class Scheduler:
                 task.status = "failed"
                 return
 
+    def resume_from(self, store: "RunStore") -> List[str]:
+        """Restore task state from a persisted journal.
+
+        Succeeded tasks stay done (never re-run). Failed tasks return to
+        pending within their remaining retry budget. Runs left 'running' by
+        an interruption are ambiguous side effects: they come back as
+        pending too, but their run ids are returned so the operator can
+        inspect worktrees before re-execution.
+        """
+        records = store.load()
+        ambiguous: List[str] = []
+        latest: Dict[str, object] = {}
+        for record in records.values():
+            key = record.task_id
+            prev = latest.get(key)
+            if prev is None or record.attempt >= prev.attempt:  # type: ignore[union-attr]
+                latest[key] = record
+        for task_id, record in latest.items():  # type: ignore[union-attr]
+            task = self.graph.tasks.get(task_id)
+            if task is None:
+                continue
+            status = record.status  # type: ignore[union-attr]
+            if status == "succeeded":
+                task.status = "succeeded"
+            elif status == "failed":
+                task.status = "pending"
+                task.attempts = record.attempt  # type: ignore[union-attr]
+            elif status == "running":
+                task.status = "pending"
+                ambiguous.append(record.run_id)  # type: ignore[union-attr]
+        self.graph.refresh_blocked()
+        return ambiguous
+
     def run(self) -> Dict[str, str]:
         with ThreadPoolExecutor(max_workers=self.max_concurrency) as pool:
             futures = {}

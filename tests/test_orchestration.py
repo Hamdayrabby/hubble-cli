@@ -65,6 +65,38 @@ def test_journal_replay_is_side_effect_free(tmp_path):
     assert RunStore(tmp_path / "runs.jsonl").load()["r1"].status == "succeeded"
 
 
+def test_resume_skips_succeeded_and_flags_ambiguous(tmp_path):
+    from hubble.runs.store import RunStore
+    store = RunStore(tmp_path / "runs.jsonl")
+    store.append(RunRecord(run_id="a-1", task_id="a", status="succeeded", attempt=1))
+    store.append(RunRecord(run_id="b-1", task_id="b", status="running", attempt=1))
+    graph = TaskGraph([Task("a", "x"), Task("b", "y")])
+    sched = Scheduler(graph, _ok, store=store)
+    ambiguous = sched.resume_from(store)
+    assert ambiguous == ["b-1"]
+    assert graph.tasks["a"].status == "succeeded"
+    out = sched.run()
+    assert out["a"] == "succeeded" and out["b"] == "succeeded"
+
+
+def test_benchmark_promotes_only_improvement_without_regression():
+    from hubble.evaluation.benchmark import BenchmarkResult, compare, run_benchmark
+    calls = {"n": 0}
+
+    def execute(task_id, strategy):
+        calls["n"] += 1
+        good = strategy.get("name") == "challenger" and task_id != "t3"
+        return {"accepted": 1.0 if good else 0.0, "retries": 0, "regressions": 0}
+
+    base = run_benchmark(["t1", "t2", "t3"], {"name": "baseline"}, execute)
+    assert base.acceptance_rate == 0.0
+    calls["n"] = 0
+    chal = run_benchmark(["t1", "t2", "t3"], {"name": "challenger"}, execute)
+    assert compare(base, chal)["promoted"] is True
+    assert compare(base, BenchmarkResult(strategy="bad", acceptance_rate=1.0,
+                                         regressions=1))["promoted"] is False
+
+
 def test_failure_classification_and_strategy_guard():
     assert classify(cancelled=True) == "cancelled"
     assert classify(timed_out=True) == "timeout"
