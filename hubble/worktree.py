@@ -24,7 +24,13 @@ def _git(cwd: Path, *args: str, check: bool = True) -> str:
     except (OSError, subprocess.TimeoutExpired) as e:
         raise WorktreeError(f"git {args[0]} failed: {e}") from None
     if check and proc.returncode != 0:
-        raise WorktreeError(f"git {' '.join(args[:2])}: {(proc.stderr or proc.stdout).strip()[:400]}")
+        output = (proc.stderr or proc.stdout or "").strip()
+        if "dubious ownership" in output:
+            raise WorktreeError(
+                "git refuses this directory (dubious ownership). The checkout is "
+                f"owned by another user; run: git config --global --add safe.directory "
+                f"'{cwd}' (from a shell you trust), then retry.")
+        raise WorktreeError(f"git {' '.join(args[:2])}: {output[:400]}")
     return proc.stdout.strip()
 
 

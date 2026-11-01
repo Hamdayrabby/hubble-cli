@@ -53,6 +53,18 @@ def test_not_a_repo(tmp_path):
         worktree.create(tmp_path, "x")
 
 
+def test_dubious_ownership_gives_actionable_diagnostic(tmp_path, monkeypatch):
+    import subprocess
+
+    from hubble.worktree import _git
+    completed = subprocess.CompletedProcess(
+        args=["git", "rev-parse"], returncode=128, stdout="",
+        stderr="fatal: detected dubious ownership in repository at 'X'")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: completed)
+    with pytest.raises(worktree.WorktreeError, match="safe.directory"):
+        _git(tmp_path, "rev-parse", "--show-toplevel")
+
+
 def test_repl_worktree_switch_and_exit(repo):
     from hubble.repl import Repl
     from hubble.session import SessionStore
