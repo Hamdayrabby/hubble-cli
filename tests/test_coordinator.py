@@ -41,8 +41,9 @@ def test_writer_gets_worktree_and_base_sha(repo):
     record = coord.execute(Task("impl", "change things", required_capabilities=["one_shot"]))
     assert record.status == "succeeded"
     assert len(record.base_sha) == 40
-    assert record.branch == "hubble/orch-impl"
-    assert record.worktree_path.endswith("orch-impl")
+    assert record.branch.startswith("hubble/orch-impl-")
+    assert "orch-impl-" in record.worktree_path
+    assert record.detail["events"] >= 3 and record.detail["tail"] != []
 
 
 def test_failed_runtime_marks_failed_with_class(repo):

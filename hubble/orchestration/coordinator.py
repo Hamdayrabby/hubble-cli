@@ -61,7 +61,7 @@ class Coordinator:
                                             preferred=task.runtime_id or None)
             record.runtime_id = adapter.runtime_id
             if task.task_type in WRITER_TYPES:
-                wt_name = f"orch-{task.task_id}"[:61]
+                wt_name = f"orch-{task.task_id}-{run_id[-6:]}"[:61]
                 info = worktree.create(self.repo, wt_name, base=record.base_sha or "HEAD")
                 cwd = Path(info["path"])
                 record.worktree_path = str(cwd)
@@ -70,14 +70,23 @@ class Coordinator:
                            run_id=run_id)
             handle = adapter.start(spec)
             exit_code = 0
+            tail: List[str] = []
+            event_count = 0
             try:
                 for event in adapter.stream(handle):
+                    event_count += 1
                     if event.event_type == "failed":
                         exit_code = int(event.payload.get("exit_code") or 1)
                     elif event.event_type == "cancelled":
                         record.status = "cancelled"
+                    text = str(event.payload.get("text") or event.payload.get("error")
+                               or event.payload.get("raw") or "")
+                    if text:
+                        tail.append(f"[{event.event_type}] {text[:500]}")
+                        tail = tail[-20:]
             finally:
                 adapter.close(handle)
+            record.detail = {"events": event_count, "tail": tail}
             record.exit_code = exit_code
             if record.status != "cancelled":
                 checks = [cmd.split() for cmd in (task.acceptance or self.acceptance.get(task.task_id, []))]
