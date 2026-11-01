@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **Cross-runtime orchestration (P0):** new `hubble/runtimes/` adapter layer
+  (Muse Code, Codex, Antigravity; OpenCode/Command Code detect-only until
+  their headless modes are verified), versioned event envelope, capability
+  registry, `hubble/orchestration/` DAG + bounded scheduler, append-only run
+  journal in `hubble/runs/`, coordinator with one pinned worktree per writer
+  and independent acceptance checks, `hubble/repo_intel/` evidence inventory,
+  and `hubble/evaluation/` failure taxonomy. Operator entry:
+  `python -m hubble.orchestrate --list-runtimes`.
+
 ## 4.3.15
 
 - **Claude Code & Command Code Multi-Icon Pondering Animation:**
