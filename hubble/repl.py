@@ -382,6 +382,8 @@ class Repl:
           ("github",), "[--force]")
         r("worktree", self.cmd_worktree, "Work in an isolated git worktree (new, switch, exit, remove, list)",
           ("worktrees", "wt"), "[new|switch|exit|remove <name>]")
+        r("orchestrate", self.cmd_orchestrate, "Run an external coding runtime in an isolated worktree",
+          ("orch",), "[runtimes | run <id>:<objective> [--runtime <name>]]"),
         r("agent", self.cmd_agents, "List specialist agents, or create/fork one", ("agents",),
           "[new|create|add|fork <name>]")
         r("plugin", self.cmd_plugin, "List, install, remove, enable or disable plugins", ("plugins",),
@@ -2375,6 +2377,46 @@ class Repl:
                 console.print("Usage: /worktree [list | new <name> | switch <name> | exit | remove <name>]")
         except worktree.WorktreeError as e:
             console.print(f"[red]{escape(str(e))}[/red]")
+
+    def cmd_orchestrate(self, arg):
+        from hubble.orchestration.coordinator import Coordinator
+        from hubble.orchestration.graph import Task, TaskGraph
+        from hubble.orchestration.scheduler import Scheduler
+        from hubble.runtimes import default_registry
+        from hubble.runs.store import RunStore
+        parts = arg.split()
+        sub = parts[0].lower() if parts else "runtimes"
+        registry = default_registry(include_fake=True)
+        if sub in ("runtimes", "list", "ls"):
+            for det in registry.detect_all():
+                state = "[green]available[/green]" if det.available else "[red]unavailable[/red]"
+                diag = f" [dim]{escape('; '.join(det.diagnostics))}[/dim]" if det.diagnostics else ""
+                console.print(f"  {state} [bold]{escape(det.runtime_id)}[/bold]"
+                              f" [dim]{escape(det.version)}[/dim]{diag}")
+            return
+        if sub == "run":
+            rest = arg[len(parts[0]):].strip()
+            runtime = ""
+            if "--runtime" in rest:
+                rest, _, runtime = rest.partition("--runtime")
+                runtime = runtime.strip().split()[0] if runtime.strip() else ""
+            task_id, _, objective = rest.partition(":")
+            if not objective.strip():
+                console.print("Usage: /orchestrate run <id>:<objective> [--runtime <name>]")
+                return
+            root = self.agent.ctx.root
+            coordinator = Coordinator(root, registry)
+            store = RunStore(root / ".hubble" / "runs.jsonl")
+            graph = TaskGraph([Task(task_id=task_id.strip(), objective=objective.strip(),
+                                    runtime_id=runtime, required_capabilities=["json_stream"])])
+            with console.status("Orchestrating…"):
+                result = Scheduler(graph, coordinator.execute, store=store).run()
+            for tid, status in result.items():
+                color = "green" if status == "succeeded" else "red"
+                console.print(f"  [{color}]{escape(tid)}: {escape(status)}[/{color}]")
+            console.print("[dim]Diffs stay in their worktree until you merge them by hand.[/dim]")
+            return
+        console.print("Usage: /orchestrate [runtimes | run <id>:<objective> [--runtime <name>]]")
 
     def _switch_root(self, path: Path):
         """Point every tool at another checkout. History stays; the system prompt shows the new root."""

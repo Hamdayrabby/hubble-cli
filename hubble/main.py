@@ -48,6 +48,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="with -p: attach an image to the prompt (repeatable; needs a vision model)")
     p.add_argument("--max-turns", type=int, help="max model calls per prompt")
     p.add_argument("--cwd", help="workspace root (default: current directory)")
+    p.add_argument("--orchestrate", action="store_true",
+                   help="run a cross-runtime orchestration task instead of an agent turn "
+                        "(positional prompt becomes ID:objective; see --list-runtimes)")
+    p.add_argument("--runtime", default="",
+                   help="with --orchestrate: preferred runtime (muse-code, codex, antigravity, "
+                        "opencode, command-code, fake)")
+    p.add_argument("--list-runtimes", action="store_true",
+                   help="with --orchestrate: list runtime availability and exit")
     p.add_argument("-w", "--worktree", metavar="NAME",
                    help="work in an isolated git worktree (.hubble/worktrees/NAME, branch hubble/NAME); "
                         "created if missing")
@@ -116,6 +124,19 @@ def main(argv=None):
     root = Path(args.cwd or ".").resolve()
     if not root.is_dir():
         sys.exit(f"hubble: workspace not found: {root}")
+    if args.orchestrate:
+        from hubble.orchestrate import main as orchestrate_main
+        orch_argv = ["--repo", str(root)]
+        if args.list_runtimes:
+            orch_argv.append("--list-runtimes")
+        else:
+            if not (args.prompt or "").strip():
+                sys.exit('hubble: --orchestrate needs a task, e.g. hubble --orchestrate '
+                         '--runtime codex "impl:add a hello function"')
+            orch_argv += ["--task", args.prompt.strip()]
+            if args.runtime:
+                orch_argv += ["--runtime", args.runtime]
+        sys.exit(orchestrate_main(orch_argv))
     if args.worktree:
         from hubble import worktree
         try:
